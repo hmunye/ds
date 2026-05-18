@@ -8,7 +8,7 @@ FLAGS += $(GCFLAGS) $(LDFLAGS)
 
 .DEFAULT_GOAL := all
 
-.PHONY: all fmt test run vet clean
+.PHONY: all fmt test run lint vuln clean
 
 all: $(BIN)
 
@@ -19,13 +19,15 @@ fmt:
 	@go fmt ./...
 
 test:
-	@go test ./...
+	@go test -v ./...
 
 run: all
 	@./$(BIN)
 
-vet:
+lint:
 	@golangci-lint run
+
+vuln: lint
 	@govulncheck ./...
 
 clean:
