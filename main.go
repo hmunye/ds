@@ -1,29 +1,51 @@
 package main
 
 import (
-	"bufio"
-	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/hmunye/ds/messenger"
 )
 
 func main() {
-	scanner := bufio.NewScanner(os.Stdin)
+	logger := slog.New(slog.NewJSONHandler(
+		os.Stderr,
+		&slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		},
+	))
+	slog.SetDefault(logger)
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	n := messenger.NewNode()
 
-		msg, err := messenger.ParseMessage(line)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ERROR:", err)
-			continue
-		}
+	messenger.RegisterHandler(
+		n, "init",
+		func(incoming messenger.Message[messenger.InitRequest]) error {
+			n.Bootstrap(&incoming)
 
-		fmt.Println(msg.FormatMessage())
-	}
+			body := messenger.InitResponse{
+				Meta: messenger.Meta{
+					Type:      "init_ok",
+					InReplyTo: incoming.Body.MsgID,
+				},
+			}
 
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR:", err)
+			return messenger.Reply(n, incoming, body)
+		})
+
+	messenger.RegisterHandler(
+		n, "echo",
+		func(incoming messenger.Message[messenger.EchoMessage]) error {
+			body := incoming.Body
+
+			body.Type = "echo_ok"
+			body.InReplyTo = incoming.Body.MsgID
+
+			return messenger.Reply(n, incoming, body)
+		})
+
+	if err := n.Run(); err != nil {
+		slog.Error("node failed", "error", err)
+		os.Exit(1)
 	}
 }

@@ -1,4 +1,5 @@
-BIN := main
+BIN := node
+BUILD_DIR := bin
 
 FLAGS = -trimpath
 GCFLAGS = -gcflags=""
@@ -13,7 +14,7 @@ FLAGS += $(GCFLAGS) $(LDFLAGS)
 all: $(BIN)
 
 $(BIN): fmt
-	@go build -o $@ $(FLAGS)
+	@go build -o $(BUILD_DIR)/$@ $(FLAGS) .
 
 fmt:
 	@go fmt ./...
@@ -22,13 +23,13 @@ test:
 	@go test -v ./...
 
 run: all
-	@./$(BIN)
+	@./$(BUILD_DIR)/$(BIN)
 
 lint:
-	@golangci-lint run
+	@golangci-lint run ./...
 
 vuln: lint
 	@govulncheck ./...
 
 clean:
-	@go clean -testcache; rm -f $(BIN)
+	@go clean -testcache; rm -rf $(BUILD_DIR)

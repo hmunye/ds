@@ -11,3 +11,4 @@ This project is licensed under the [MIT License].
 ## References
 
 - [Build Distributed Systems from Scratch](https://builddistributedsystem.com/)
+- [Maelstrom](https://github.com/jepsen-io/maelstrom)
