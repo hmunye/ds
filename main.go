@@ -8,7 +8,7 @@ import (
 )
 
 type EchoMessage struct {
-	messenger.PayloadMetadata
+	messenger.RPCMetadata
 	Echo string `json:"echo"`
 }
 
@@ -26,7 +26,7 @@ func main() {
 	})
 
 	if err := n.Run(); err != nil {
-		slog.Error("node execution failed", slog.Any("error", err))
+		slog.Error("node failed", slog.Any("error", err))
 		os.Exit(1)
 	}
 }

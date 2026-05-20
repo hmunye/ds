@@ -34,6 +34,97 @@ import (
 	"sync/atomic"
 )
 
+type ErrorCode int
+
+const (
+	// Indicates the requested operation could not be completed within a timeout
+	// (indefinite).
+	ErrTimeout ErrorCode = 0
+	// Indicates a client sent an RPC request to a node which does not exist
+	// (definite).
+	ErrNodeNotFound = 1
+
+	// Indicates a requested operation is not supported by the current
+	// implementation. Helpful for stubbing out APIs during development
+	// (definite).
+	ErrNotSupported = 10
+	// Indicates the operation definitely cannot be performed at this
+	// time--perhaps because the server is in a read-only state, has not yet
+	// been initialized, believes its peers to be down, and so on. Do not use
+	// this error for indeterminate cases, when the operation may actually have
+	// taken place (definite).
+	ErrTemporarilyUnavailable = 11
+	// Indicates the client's request did not conform to the server's
+	// expectations, and could not possibly have been processed (definite).
+	ErrMalformedRequest = 12
+	// Indicates some kind of general, indefinite error occurred. Use this as a
+	// catch-all for errors you can't otherwise categorize, or as a starting
+	// point for your error handler: it's safe to return crash for every problem
+	// by default, then add special cases for more specific errors later
+	// (indefinite).
+	ErrCrash = 13
+	// Indicates some kind of general, definite error occurred. Use this as a
+	// catch-all for errors you can't otherwise categorize, when you
+	// specifically know that the requested operation has not taken place. For
+	// instance, you might encounter an indefinite failure during the prepare
+	// phase of a transaction: since you haven't started the commit process yet,
+	// the transaction can't have taken place. It's therefore safe to return a
+	// definite abort to the client (definite).
+	ErrAbort = 14
+
+	// Indicates an operation on a key which does not exist (assuming the
+	// operation should not automatically create missing keys) (definite).
+	ErrKeyDoesNotExist = 20
+	// Indicates the creation of a key which already exists, and the server will
+	// not overwrite it (definite).
+	ErrKeyAlreadyExists = 21
+	// Indicates the requested operation expected some conditions to hold, and
+	// those conditions were not met. For instance, a compare-and-set operation
+	// might assert that the value of a key is currently 5; if the value is 3,
+	// the server would return precondition-failed (definite).
+	ErrPreconditionFailed = 22
+
+	// Indicates the requested transaction has been aborted because of a
+	// conflict with another transaction. Servers need not return this error on
+	// every conflict: they may choose to retry automatically instead
+	// (definite).
+	ErrTxnConflict = 30
+)
+
+func (e ErrorCode) Error() string {
+	switch e {
+	case ErrTimeout:
+		return "timeout"
+	case ErrNodeNotFound:
+		return "node not found"
+
+	case ErrNotSupported:
+		return "not supported"
+	case ErrTemporarilyUnavailable:
+		return "temporarily unavailable"
+	case ErrMalformedRequest:
+		return "malformed request"
+
+	case ErrCrash:
+		return "crash"
+	case ErrAbort:
+		return "abort"
+
+	case ErrKeyDoesNotExist:
+		return "key does not exist"
+	case ErrKeyAlreadyExists:
+		return "key already exists"
+	case ErrPreconditionFailed:
+		return "precondition failed"
+
+	case ErrTxnConflict:
+		return "txn conflict"
+
+	default:
+		return "unknown error"
+	}
+}
+
 // Message represents a `Maelstrom` message.
 type Message[T hasMetadata] struct {
 	Src  string `json:"src"`
@@ -41,31 +132,45 @@ type Message[T hasMetadata] struct {
 	Body T      `json:"body"`
 }
 
-// PayloadMetadata contains metadata fields shared by all `Maelstrom` message
+// RPCMetadata contains metadata fields shared by all `Maelstrom` message
 // payloads.
-type PayloadMetadata struct {
+type RPCMetadata struct {
 	Type      string `json:"type"`
 	MsgID     int    `json:"msg_id,omitempty"`
 	InReplyTo int    `json:"in_reply_to,omitempty"`
 }
 
-func (p PayloadMetadata) payload() PayloadMetadata { return p }
+func (meta RPCMetadata) MetaType() string   { return meta.Type }
+func (meta RPCMetadata) MetaMsgID() int     { return meta.MsgID }
+func (meta RPCMetadata) MetaInReplyTo() int { return meta.InReplyTo }
+
+// ErrorMessage represents an "error" message exchanged between `Maelstrom`
+// nodes.
+type ErrorMessage struct {
+	RPCMetadata
+	Code ErrorCode `json:"code"`
+	Text string    `json:"text,omitempty"`
+}
 
 type initRequest struct {
-	PayloadMetadata
+	RPCMetadata
 	NodeID  string   `json:"node_id"`
 	NodeIDs []string `json:"node_ids"`
 }
 
 type initResponse struct {
-	PayloadMetadata
+	RPCMetadata
 }
 
-// hasMetadata acts as a compile-time constraint ensuring each instantiated
-// [Message.Body] embeds [PayloadMetadata].
+// hasMetadata is used as a compile-time constraint ensuring each instantiated
+// [Message.Body] embeds [RPCMetadata].
 type hasMetadata interface {
-	payload() PayloadMetadata
+	MetaType() string
+	MetaMsgID() int
+	MetaInReplyTo() int
 }
+
+type HandlerFunc func(json.RawMessage) error
 
 // Node represents a `Maelstrom` node.
 type Node struct {
@@ -75,7 +180,7 @@ type Node struct {
 	nextMsgID atomic.Int32
 	out       io.Writer
 	logger    *slog.Logger
-	handlers  map[string]func(json.RawMessage) error
+	handlers  map[string]HandlerFunc
 	mu        sync.Mutex
 }
 
@@ -100,7 +205,7 @@ func newNode(out io.Writer) *Node {
 	n := &Node{
 		out:      out,
 		logger:   logger,
-		handlers: make(map[string]func(json.RawMessage) error),
+		handlers: make(map[string]HandlerFunc),
 	}
 	n.nextMsgID.Store(1)
 
@@ -109,13 +214,31 @@ func newNode(out io.Writer) *Node {
 		n.configure(&incoming)
 
 		body := initResponse{
-			PayloadMetadata{
+			RPCMetadata{
 				Type:      "init_ok",
 				InReplyTo: incoming.Body.MsgID,
 			},
 		}
 
 		return Reply(n, incoming, body)
+	})
+
+	// Register default "error" handler.
+	Handle(n, "error", func(incoming Message[ErrorMessage]) error {
+		var msg string
+		if incoming.Body.Text != "" {
+			msg = incoming.Body.Text
+		} else {
+			msg = incoming.Body.Code.Error()
+		}
+
+		slog.Error(
+			"received client error",
+			slog.Int("code", int(incoming.Body.Code)),
+			slog.String("error", msg),
+		)
+
+		return nil
 	})
 
 	return n
@@ -149,9 +272,10 @@ func Send[Out hasMetadata](n *Node, dst string, payload Out) error {
 // `Maelstrom` message of that type is received. Handlers must be registered
 // before calling [Node.Run].
 func Handle[In hasMetadata](n *Node, msgType string, callback func(Message[In]) error) {
-	n.handlers[msgType] = func(data json.RawMessage) error {
+	n.handlers[msgType] = func(line json.RawMessage) error {
 		var msg Message[In]
-		if err := json.Unmarshal(data, &msg); err != nil {
+		if err := json.Unmarshal(line, &msg); err != nil {
+			slog.Error("failed to decode message", slog.Any("error", err))
 			return err
 		}
 
@@ -160,39 +284,39 @@ func Handle[In hasMetadata](n *Node, msgType string, callback func(Message[In]) 
 }
 
 // Run continuously reads `Maelstrom` messages from STDIN, dispatching each to
-// its registered handler. An error is returned if a message is received with no
-// corresponding handler.
+// its registered handler. An error is returned if an incoming message type has
+// no corresponding handler.
 func (n *Node) Run() error {
 	return n.run(os.Stdin)
 }
 
-func (n *Node) run(reader io.Reader) error {
+func (n *Node) run(reader io.Reader) (err error) {
 	var wg sync.WaitGroup
-	var meta struct {
-		Body struct {
-			Type string `json:"type"`
-		} `json:"body"`
-	}
-
 	scanner := bufio.NewScanner(reader)
 
 	for scanner.Scan() {
 		line := []byte(scanner.Text())
 
+		var meta struct {
+			Body struct {
+				Type string `json:"type"`
+			} `json:"body"`
+		}
 		if err := json.Unmarshal(line, &meta); err != nil {
-			slog.Error("failed to parse message", slog.Any("error", err))
+			slog.Error("failed to decode message type", slog.Any("error", err))
 			continue
 		}
 
 		ty := meta.Body.Type
 		if ty == "" {
-			slog.Error("failed to parse message", slog.String("error", "missing `type` field"))
+			slog.Error("failed to decode message type", slog.String("error", "missing `type` field"))
 			continue
 		}
 
 		callback, ok := n.handlers[ty]
 		if !ok {
-			return fmt.Errorf("no handler registered for message type: %q", ty)
+			err = fmt.Errorf("unregistered message type: %q", ty)
+			break
 		}
 
 		wg.Go(func() {
@@ -216,15 +340,20 @@ func (n *Node) run(reader io.Reader) error {
 
 	wg.Wait()
 
-	return scanner.Err()
+	if err == nil {
+		err = scanner.Err()
+	}
+
+	return
 }
 
 func (n *Node) configure(incoming *Message[initRequest]) {
-	// NOTE: Safe for concurrent use without a Mutex; Maelstrom guarantees no
-	// other messages are delivered until the node responds to the "init"
-	// message.
-
+	// NOTE: Safe for concurrent use without synchronization; Maelstrom
+	// guarantees no other messages are delivered until the node responds
+	// to the initial "init" message.
 	n.NodeID = incoming.Body.NodeID
 	n.NodeIDs = incoming.Body.NodeIDs
+
 	n.logger = n.logger.With(slog.String("node_id", n.NodeID))
+	slog.SetDefault(n.logger)
 }

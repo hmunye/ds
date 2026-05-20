@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +44,7 @@ func TestInitMessage(t *testing.T) {
 		Src: "c1",
 		Dst: "n3",
 		Body: initRequest{
-			PayloadMetadata: PayloadMetadata{
+			RPCMetadata: RPCMetadata{
 				Type:  "init",
 				MsgID: 1,
 			},
@@ -76,11 +77,20 @@ func TestInitMessage(t *testing.T) {
 	if resp.Body.InReplyTo != initMsg.Body.MsgID {
 		t.Errorf("expected \"in_reply_to\" value %d, got %d", initMsg.Body.MsgID, resp.Body.InReplyTo)
 	}
+
+	if node.NodeID != "n3" {
+		t.Errorf("expected node ID \"n3\", got %q", node.NodeID)
+	}
+
+	expectedIDs := []string{"n1", "n2", "n3"}
+	if !slices.Equal(node.NodeIDs, expectedIDs) {
+		t.Errorf("expected node IDs %v, got %v", expectedIDs, node.NodeIDs)
+	}
 }
 
 func TestUnregisteredMessageType(t *testing.T) {
 	type DummyMessage struct {
-		PayloadMetadata
+		RPCMetadata
 		Data string `json:"data"`
 	}
 
@@ -89,7 +99,7 @@ func TestUnregisteredMessageType(t *testing.T) {
 		Src: "c1",
 		Dst: "n3",
 		Body: DummyMessage{
-			PayloadMetadata: PayloadMetadata{
+			RPCMetadata: RPCMetadata{
 				Type:  "unknown",
 				MsgID: 1,
 			},
@@ -99,8 +109,7 @@ func TestUnregisteredMessageType(t *testing.T) {
 
 	input := bytes.NewBuffer(encodeMessage(msg))
 
-	err := node.run(input)
-	if err == nil {
+	if err := node.run(input); err == nil {
 		t.Fatal("expected error, got nil")
 	}
 }
@@ -113,7 +122,7 @@ func TestConcurrentMessageHandling(t *testing.T) {
 	counter := 0
 
 	type CountMessage struct {
-		PayloadMetadata
+		RPCMetadata
 		Value int `json:"value"`
 	}
 
@@ -136,7 +145,7 @@ func TestConcurrentMessageHandling(t *testing.T) {
 			Src: "c1",
 			Dst: "n3",
 			Body: CountMessage{
-				PayloadMetadata: PayloadMetadata{
+				RPCMetadata: RPCMetadata{
 					Type:  "count",
 					MsgID: i,
 				},
@@ -186,19 +195,19 @@ func TestMalformedMessages(t *testing.T) {
 			`{"src":"c1","dest":"n1","body":"just a string"}`,
 		},
 		{
-			"empty input",
+			"empty line",
 			"",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// t.Parallel()
+			t.Parallel()
+
 			node, out := newTestNode()
 			input := bytes.NewBufferString(tt.input + "\n")
 
-			err := node.run(input)
-			if err != nil {
+			if err := node.run(input); err != nil {
 				t.Fatalf("expected nil, got error: %v", err)
 			}
 
