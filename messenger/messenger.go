@@ -1,26 +1,41 @@
-// Package messenger provides utilities for building message-based distributed
-// systems on top of `Maelstrom`.
+// Package messenger provides utilities for building message-based nodes
+// (distributed processes) on top of `Maelstrom`.
 //
-// Distributed systems communicate by exchanging messages. Unlike threads in a
-// single process, distributed processes (nodes) cannot directly share memory,
-// fundamentally shaping how distributed algorithms are designed.
+// Nodes in a distributed system communicate by exchanging messages. Unlike
+// threads in a single process, nodes cannot directly share memory, which
+// fundamentally shapes how distributed algorithms are designed.
 //
 // In a traditional single-machine program, threads operate within the same
-// virtual address space and can communicate through shared memory. Separate
-// processes can also communicate locally using mechanisms such as sockets,
-// pipes, or memory-mapped pages (`mmap`).
+// memory space and can communicate through shared memory. Separate processes
+// on the same host can communicate using mechanisms such as sockets, pipes,
+// or memory-mapped pages (`mmap`).
 //
-// In a distributed system, however, each program runs on a different machine
-// with its own memory and execution environment. Communication must happen
-// over a network, which introduces additional challenges:
+// In a distributed system, each node runs on a different machine with its own
+// memory and execution environment. Communication must happen over a network,
+// which introduces additional challenges:
 //
 //   - messages may be lost
 //   - messages may be delayed
-//   - messages may be transmitted out of order
+//   - messages may be received out of order
 //
-// Because nodes cannot directly inspect each other's state, every message
-// must contain enough information for the receiving node to process it
-// independently.
+// Because nodes cannot directly inspect each other's state, every message must
+// contain enough information for the receiver to process it independently. The
+// `Maelstrom` RPC (Remote Procedure Call) protocol facilitates this by using
+// self-contained JSON objects sent over STDIN and STDOUT. Each message includes
+// `src`, `dest`, and a `body` containing a `type` field and optional payload,
+// allowing nodes to identify the sender, destination, and purpose of the
+// communication without shared state.
+//
+// To handle asynchronous communication and match responses to requests,
+// messages use IDs (e.g., `msg_id`, `in_reply_to`). When a node sends a
+// request, it includes a unique identifier; when the receiver responds, it
+// echoes that identifier back, allowing the sender to correlate the response
+// with its original request.
+//
+// Additionally, `Maelstrom` defines a standard error format using structured
+// error codes (similar to HTTP status codes) rather than human-readable text,
+// enabling nodes to make programmatic decisions about retrying or failing
+// requests based on the nature of the failure (e.g., indefinite or definite).
 package messenger
 
 import (
@@ -125,27 +140,26 @@ func (e ErrorCode) Error() string {
 	}
 }
 
-// Message represents a `Maelstrom` message.
+// Message represents a `Maelstrom` message. Each instantiated Message must
+// embed [RPCMetadata].
 type Message[T hasMetadata] struct {
 	Src  string `json:"src"`
 	Dst  string `json:"dest"`
 	Body T      `json:"body"`
 }
 
-// RPCMetadata contains metadata fields shared by all `Maelstrom` message
-// payloads.
+// RPCMetadata contains metadata fields shared by `Maelstrom` message payloads.
 type RPCMetadata struct {
 	Type      string `json:"type"`
-	MsgID     int    `json:"msg_id,omitempty"`
-	InReplyTo int    `json:"in_reply_to,omitempty"`
+	MsgID     uint64 `json:"msg_id,omitempty"`
+	InReplyTo uint64 `json:"in_reply_to,omitempty"`
 }
 
-func (meta RPCMetadata) MetaType() string   { return meta.Type }
-func (meta RPCMetadata) MetaMsgID() int     { return meta.MsgID }
-func (meta RPCMetadata) MetaInReplyTo() int { return meta.InReplyTo }
+func (meta RPCMetadata) MetaType() string      { return meta.Type }
+func (meta RPCMetadata) MetaMsgID() uint64     { return meta.MsgID }
+func (meta RPCMetadata) MetaInReplyTo() uint64 { return meta.InReplyTo }
 
-// ErrorMessage represents an "error" message exchanged between `Maelstrom`
-// nodes.
+// ErrorMessage represents an "error" message exchanged between nodes.
 type ErrorMessage struct {
 	RPCMetadata
 	Code ErrorCode `json:"code"`
@@ -166,8 +180,8 @@ type initResponse struct {
 // [Message.Body] embeds [RPCMetadata].
 type hasMetadata interface {
 	MetaType() string
-	MetaMsgID() int
-	MetaInReplyTo() int
+	MetaMsgID() uint64
+	MetaInReplyTo() uint64
 }
 
 type HandlerFunc func(json.RawMessage) error
@@ -177,16 +191,16 @@ type Node struct {
 	NodeID  string
 	NodeIDs []string
 
-	nextMsgID atomic.Int32
+	nextMsgID atomic.Uint64
 	out       io.Writer
 	logger    *slog.Logger
 	handlers  map[string]HandlerFunc
 	mu        sync.Mutex
 }
 
-// MsgID returns the node's current message counter.
-func (n *Node) MsgID() int {
-	return int(n.nextMsgID.Load())
+// NextMsgID atomically increments and returns the next unique message ID.
+func (n *Node) NextMsgID() uint64 {
+	return uint64(n.nextMsgID.Add(1))
 }
 
 // NewNode returns a new `Maelstrom` node, whose state is logically finalized
@@ -207,7 +221,6 @@ func newNode(out io.Writer) *Node {
 		logger:   logger,
 		handlers: make(map[string]HandlerFunc),
 	}
-	n.nextMsgID.Store(1)
 
 	// Register default "init" handler.
 	Handle(n, "init", func(incoming Message[initRequest]) error {
@@ -233,7 +246,7 @@ func newNode(out io.Writer) *Node {
 		}
 
 		slog.Error(
-			"received client error",
+			"incoming \"error\" message",
 			slog.Int("code", int(incoming.Body.Code)),
 			slog.String("error", msg),
 		)
@@ -244,13 +257,12 @@ func newNode(out io.Writer) *Node {
 	return n
 }
 
-// Reply transmits a message payload in response to an incoming request via
-// STDOUT.
+// Reply transmits a payload in response to an incoming request via STDOUT.
 func Reply[In hasMetadata, Out hasMetadata](n *Node, incoming Message[In], payload Out) error {
 	return Send(n, incoming.Src, payload)
 }
 
-// Send transmits a message payload to the specified destination via STDOUT.
+// Send transmits a payload to the specified destination node via STDOUT.
 func Send[Out hasMetadata](n *Node, dst string, payload Out) error {
 	msg := Message[Out]{Src: n.NodeID, Dst: dst, Body: payload}
 
@@ -258,8 +270,6 @@ func Send[Out hasMetadata](n *Node, dst string, payload Out) error {
 	if err != nil {
 		return err
 	}
-
-	n.nextMsgID.Add(1)
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -275,7 +285,7 @@ func Handle[In hasMetadata](n *Node, msgType string, callback func(Message[In]) 
 	n.handlers[msgType] = func(line json.RawMessage) error {
 		var msg Message[In]
 		if err := json.Unmarshal(line, &msg); err != nil {
-			slog.Error("failed to decode message", slog.Any("error", err))
+			slog.Error("failed to decode incoming message", slog.Any("error", err))
 			return err
 		}
 
@@ -283,9 +293,9 @@ func Handle[In hasMetadata](n *Node, msgType string, callback func(Message[In]) 
 	}
 }
 
-// Run continuously reads `Maelstrom` messages from STDIN, dispatching each to
-// its registered handler. An error is returned if an incoming message type has
-// no corresponding handler.
+// Run continuously reads `Maelstrom` formatted messages from STDIN, dispatching
+// each to its registered handler. An error is returned if an incoming message
+// type has no corresponding handler registered.
 func (n *Node) Run() error {
 	return n.run(os.Stdin)
 }
@@ -303,19 +313,19 @@ func (n *Node) run(reader io.Reader) (err error) {
 			} `json:"body"`
 		}
 		if err := json.Unmarshal(line, &meta); err != nil {
-			slog.Error("failed to decode message type", slog.Any("error", err))
+			slog.Error("failed to decode incoming message type", slog.Any("error", err))
 			continue
 		}
 
 		ty := meta.Body.Type
 		if ty == "" {
-			slog.Error("failed to decode message type", slog.String("error", "missing `type` field"))
+			slog.Error("failed to decode incoming message type", slog.String("error", "missing `type` field"))
 			continue
 		}
 
 		callback, ok := n.handlers[ty]
 		if !ok {
-			err = fmt.Errorf("unregistered message type: %q", ty)
+			err = fmt.Errorf("unregistered type for incoming message: %q", ty)
 			break
 		}
 
@@ -330,7 +340,7 @@ func (n *Node) run(reader io.Reader) (err error) {
 			}()
 
 			if err := callback(line); err != nil {
-				slog.Error("failed to process message",
+				slog.Error("failed to process incoming message",
 					slog.Any("error", err),
 					slog.String("type", ty),
 				)
@@ -348,9 +358,8 @@ func (n *Node) run(reader io.Reader) (err error) {
 }
 
 func (n *Node) configure(incoming *Message[initRequest]) {
-	// NOTE: Safe for concurrent use without synchronization; Maelstrom
-	// guarantees no other messages are delivered until the node responds
-	// to the initial "init" message.
+	// NOTE: Safe for concurrent use without locks; `Maelstrom` ensures no other
+	// messages are delivered until the node responds to the "init" message.
 	n.NodeID = incoming.Body.NodeID
 	n.NodeIDs = incoming.Body.NodeIDs
 

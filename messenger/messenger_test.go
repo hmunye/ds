@@ -133,7 +133,7 @@ func TestConcurrentMessageHandling(t *testing.T) {
 
 		outgoing := incoming.Body
 		outgoing.Type = "count_ok"
-		outgoing.MsgID = node.MsgID()
+		outgoing.MsgID = node.NextMsgID()
 		outgoing.InReplyTo = incoming.Body.MsgID
 
 		return Reply(node, incoming, outgoing)
@@ -147,7 +147,7 @@ func TestConcurrentMessageHandling(t *testing.T) {
 			Body: CountMessage{
 				RPCMetadata: RPCMetadata{
 					Type:  "count",
-					MsgID: i,
+					MsgID: uint64(i),
 				},
 				Value: 1,
 			},

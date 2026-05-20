@@ -19,7 +19,7 @@ func main() {
 		outgoing := incoming.Body
 
 		outgoing.Type = "echo_ok"
-		outgoing.MsgID = n.MsgID()
+		outgoing.MsgID = n.NextMsgID()
 		outgoing.InReplyTo = incoming.Body.MsgID
 
 		return messenger.Reply(n, incoming, outgoing)
