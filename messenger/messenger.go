@@ -3,8 +3,7 @@
 //
 // Distributed systems communicate by exchanging messages. Unlike threads in a
 // single process, distributed processes (nodes) cannot directly share memory,
-// and this constraint fundamentally shapes how distributed algorithms are
-// designed.
+// fundamentally shaping how distributed algorithms are designed.
 //
 // In a traditional single-machine program, threads operate within the same
 // virtual address space and can communicate through shared memory. Separate
@@ -28,6 +27,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sync"
@@ -35,40 +35,37 @@ import (
 )
 
 // Message represents a `Maelstrom` message.
-type Message[T any] struct {
+type Message[T hasMetadata] struct {
 	Src  string `json:"src"`
 	Dst  string `json:"dest"`
 	Body T      `json:"body"`
 }
 
-// Meta contains common metadata fields shared by all `Maelstrom` payloads.
-type Meta struct {
+// PayloadMetadata contains metadata fields shared by all `Maelstrom` message
+// payloads.
+type PayloadMetadata struct {
 	Type      string `json:"type"`
 	MsgID     int    `json:"msg_id,omitempty"`
 	InReplyTo int    `json:"in_reply_to,omitempty"`
 }
 
-// InitRequest represents the incoming payload for a `Maelstrom` "init" message
-// sent at startup.
-type InitRequest struct {
-	Meta
+func (p PayloadMetadata) payload() PayloadMetadata { return p }
+
+type initRequest struct {
+	PayloadMetadata
 	NodeID  string   `json:"node_id"`
 	NodeIDs []string `json:"node_ids"`
 }
 
-// InitResponse represents the outgoing payload to a `Maelstrom` "init" message.
-type InitResponse struct {
-	Meta
+type initResponse struct {
+	PayloadMetadata
 }
 
-// EchoMessage represents the incoming/outgoing message payload for a
-// `Maelstrom` "echo" message.
-type EchoMessage struct {
-	Meta
-	Echo string `json:"echo"`
+// hasMetadata acts as a compile-time constraint ensuring each instantiated
+// [Message.Body] embeds [PayloadMetadata].
+type hasMetadata interface {
+	payload() PayloadMetadata
 }
-
-type MessageHandler func(json.RawMessage) error
 
 // Node represents a `Maelstrom` node.
 type Node struct {
@@ -76,74 +73,84 @@ type Node struct {
 	NodeIDs []string
 
 	nextMsgID atomic.Int32
-	handlers  map[string]MessageHandler
+	out       io.Writer
+	logger    *slog.Logger
+	handlers  map[string]func(json.RawMessage) error
 	mu        sync.Mutex
 }
 
-// NewNode returns a new `Maelstrom` node. It must be initialized by handling
-// an "init" message via [Node.Bootstrap].
-func NewNode() *Node {
-	node := &Node{
-		handlers: make(map[string]MessageHandler),
-	}
-
-	node.nextMsgID.Store(1)
-	return node
+// MsgID returns the node's current message counter.
+func (n *Node) MsgID() int {
+	return int(n.nextMsgID.Load())
 }
 
-// Bootstrap initializes the node from an incoming [InitRequest], setting the
-// node's identity and cluster membership.
-func (n *Node) Bootstrap(incoming *Message[InitRequest]) {
+// NewNode returns a new `Maelstrom` node, whose state is logically finalized
+// upon receiving a valid "init" message.
+func NewNode() *Node {
+	return newNode(os.Stdout)
+}
+
+func newNode(out io.Writer) *Node {
+	logger := slog.New(slog.NewJSONHandler(
+		os.Stderr,
+		&slog.HandlerOptions{Level: slog.LevelDebug},
+	))
+	slog.SetDefault(logger)
+
+	n := &Node{
+		out:      out,
+		logger:   logger,
+		handlers: make(map[string]func(json.RawMessage) error),
+	}
+	n.nextMsgID.Store(1)
+
+	// Register default "init" handler.
+	Handle(n, "init", func(incoming Message[initRequest]) error {
+		n.configure(&incoming)
+
+		body := initResponse{
+			PayloadMetadata{
+				Type:      "init_ok",
+				InReplyTo: incoming.Body.MsgID,
+			},
+		}
+
+		return Reply(n, incoming, body)
+	})
+
+	return n
+}
+
+// Reply transmits a message payload in response to an incoming request via
+// STDOUT.
+func Reply[In hasMetadata, Out hasMetadata](n *Node, incoming Message[In], payload Out) error {
+	return Send(n, incoming.Src, payload)
+}
+
+// Send transmits a message payload to the specified destination via STDOUT.
+func Send[Out hasMetadata](n *Node, dst string, payload Out) error {
+	msg := Message[Out]{Src: n.NodeID, Dst: dst, Body: payload}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	n.nextMsgID.Add(1)
+
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	n.NodeID = incoming.Body.NodeID
-	n.NodeIDs = incoming.Body.NodeIDs
-}
-
-// Send sends a message with the given typed payload to the specified
-// destination node via stdout.
-func SendMessage[T any](n *Node, dst string, payload T) error {
-	outgoing := Message[T]{Src: n.NodeID, Dst: dst, Body: payload}
-
-	bytes, err := json.Marshal(outgoing)
-	if err != nil {
-		return err
-	}
-
-	n.nextMsgID.Store(n.nextMsgID.Load() + 1)
-
-	_, err = fmt.Println(string(bytes))
+	_, err = n.out.Write(append(data, '\n'))
 	return err
 }
 
-// Reply sends a response given an incoming request and outgoing payload via
-// stdout.
-func Reply[I any, O any](n *Node, incoming Message[I], payload O) error {
-	outgoing := Message[O]{
-		Src:  incoming.Dst,
-		Dst:  incoming.Src,
-		Body: payload,
-	}
-
-	bytes, err := json.Marshal(outgoing)
-	if err != nil {
-		return err
-	}
-
-	n.nextMsgID.Store(n.nextMsgID.Load() + 1)
-
-	_, err = fmt.Println(string(bytes))
-	return err
-}
-
-// Handle registers a handler for the given message type.
-//
-// When a `Maelstrom` message with the message type is received, the registered
-// handler will be invoked.
-func RegisterHandler[T any](n *Node, msgType string, callback func(Message[T]) error) {
+// Handle registers a handler for messages of the given type, invoked whenever a
+// `Maelstrom` message of that type is received. Handlers must be registered
+// before calling [Node.Run].
+func Handle[In hasMetadata](n *Node, msgType string, callback func(Message[In]) error) {
 	n.handlers[msgType] = func(data json.RawMessage) error {
-		var msg Message[T]
+		var msg Message[In]
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return err
 		}
@@ -152,43 +159,55 @@ func RegisterHandler[T any](n *Node, msgType string, callback func(Message[T]) e
 	}
 }
 
-// Run continuously reads messages from stdin, dispatching incoming messages
-// to registered handlers.
-//
-// If no handler is registered for the "type" of the incoming message, an error
-// is returned.
+// Run continuously reads `Maelstrom` messages from STDIN, dispatching each to
+// its registered handler. An error is returned if a message is received with no
+// corresponding handler.
 func (n *Node) Run() error {
-	wg := sync.WaitGroup{}
-	scanner := bufio.NewScanner(os.Stdin)
+	return n.run(os.Stdin)
+}
+
+func (n *Node) run(reader io.Reader) error {
+	var wg sync.WaitGroup
+	var meta struct {
+		Body struct {
+			Type string `json:"type"`
+		} `json:"body"`
+	}
+
+	scanner := bufio.NewScanner(reader)
 
 	for scanner.Scan() {
 		line := []byte(scanner.Text())
 
-		ty, err := parseMessageType(line)
-		if err != nil {
-			slog.Error("error parsing message", "error", err)
+		if err := json.Unmarshal(line, &meta); err != nil {
+			slog.Error("failed to parse message", slog.Any("error", err))
+			continue
+		}
+
+		ty := meta.Body.Type
+		if ty == "" {
+			slog.Error("failed to parse message", slog.String("error", "missing `type` field"))
 			continue
 		}
 
 		callback, ok := n.handlers[ty]
 		if !ok {
-			slog.Error("no handler for message type", slog.String("type", ty))
-			continue
+			return fmt.Errorf("no handler registered for message type: %q", ty)
 		}
 
 		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					slog.Error("handler panic",
-						slog.String("type", ty),
 						slog.String("panic", fmt.Sprint(r)),
+						slog.String("type", ty),
 					)
 				}
 			}()
 
 			if err := callback(line); err != nil {
-				slog.Error("error processing message",
-					"error", err,
+				slog.Error("failed to process message",
+					slog.Any("error", err),
 					slog.String("type", ty),
 				)
 			}
@@ -200,24 +219,12 @@ func (n *Node) Run() error {
 	return scanner.Err()
 }
 
-func parseMessageType(line []byte) (string, error) {
-	var raw struct {
-		Body json.RawMessage `json:"body"`
-	}
-	if err := json.Unmarshal(line, &raw); err != nil {
-		return "", fmt.Errorf("failed to parse message: %w", err)
-	}
+func (n *Node) configure(incoming *Message[initRequest]) {
+	// NOTE: Safe for concurrent use without a Mutex; Maelstrom guarantees no
+	// other messages are delivered until the node responds to the "init"
+	// message.
 
-	var meta struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(raw.Body, &meta); err != nil {
-		return "", fmt.Errorf("failed to parse message type: %w", err)
-	}
-
-	if meta.Type == "" {
-		return "", fmt.Errorf("message missing 'type' field")
-	}
-
-	return meta.Type, nil
+	n.NodeID = incoming.Body.NodeID
+	n.NodeIDs = incoming.Body.NodeIDs
+	n.logger = n.logger.With(slog.String("node_id", n.NodeID))
 }

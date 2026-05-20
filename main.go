@@ -7,45 +7,26 @@ import (
 	"github.com/hmunye/ds/messenger"
 )
 
-func main() {
-	logger := slog.New(slog.NewJSONHandler(
-		os.Stderr,
-		&slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		},
-	))
-	slog.SetDefault(logger)
+type EchoMessage struct {
+	messenger.PayloadMetadata
+	Echo string `json:"echo"`
+}
 
+func main() {
 	n := messenger.NewNode()
 
-	messenger.RegisterHandler(
-		n, "init",
-		func(incoming messenger.Message[messenger.InitRequest]) error {
-			n.Bootstrap(&incoming)
+	messenger.Handle(n, "echo", func(incoming messenger.Message[EchoMessage]) error {
+		outgoing := incoming.Body
 
-			body := messenger.InitResponse{
-				Meta: messenger.Meta{
-					Type:      "init_ok",
-					InReplyTo: incoming.Body.MsgID,
-				},
-			}
+		outgoing.Type = "echo_ok"
+		outgoing.MsgID = n.MsgID()
+		outgoing.InReplyTo = incoming.Body.MsgID
 
-			return messenger.Reply(n, incoming, body)
-		})
-
-	messenger.RegisterHandler(
-		n, "echo",
-		func(incoming messenger.Message[messenger.EchoMessage]) error {
-			body := incoming.Body
-
-			body.Type = "echo_ok"
-			body.InReplyTo = incoming.Body.MsgID
-
-			return messenger.Reply(n, incoming, body)
-		})
+		return messenger.Reply(n, incoming, outgoing)
+	})
 
 	if err := n.Run(); err != nil {
-		slog.Error("node failed", "error", err)
+		slog.Error("node execution failed", slog.Any("error", err))
 		os.Exit(1)
 	}
 }
