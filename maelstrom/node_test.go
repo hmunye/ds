@@ -1,4 +1,4 @@
-package messenger
+package maelstrom
 
 import (
 	"bytes"

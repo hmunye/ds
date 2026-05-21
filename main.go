@@ -4,25 +4,25 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/hmunye/ds/messenger"
+	"github.com/hmunye/ds/maelstrom"
 )
 
 type EchoMessage struct {
-	messenger.RPCMetadata
+	maelstrom.RPCMetadata
 	Echo string `json:"echo"`
 }
 
 func main() {
-	n := messenger.NewNode()
+	n := maelstrom.NewNode()
 
-	messenger.Handle(n, "echo", func(incoming messenger.Message[EchoMessage]) error {
-		outgoing := incoming.Body
+	maelstrom.Handle(n, "echo", func(incoming maelstrom.Message[EchoMessage]) error {
+		payload := incoming.Body
 
-		outgoing.Type = "echo_ok"
-		outgoing.MsgID = n.NextMsgID()
-		outgoing.InReplyTo = incoming.Body.MsgID
+		payload.Type = "echo_ok"
+		payload.MsgID = n.NextMsgID()
+		payload.InReplyTo = incoming.Body.MsgID
 
-		return messenger.Reply(n, incoming, outgoing)
+		return maelstrom.Reply(n, incoming, payload)
 	})
 
 	if err := n.Run(); err != nil {
