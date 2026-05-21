@@ -16,6 +16,12 @@ Maelstrom "echo" workload:
 ./maelstrom.sh test -w echo --bin /bin/node --node-count 1 --time-limit 10
 ```
 
+Maelstrom "unique-ids" workload:
+
+```bash
+./maelstrom.sh test -w unique-ids --bin /bin/node --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
+```
+
 ## License
 
 This project is licensed under the [MIT License].

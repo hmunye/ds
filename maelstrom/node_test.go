@@ -2,6 +2,7 @@ package maelstrom
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -56,7 +57,7 @@ func TestInitMessage(t *testing.T) {
 	input := bytes.NewBuffer(nil)
 	input.Write(encodeMessage(initMsg))
 
-	if err := node.run(input); err != nil {
+	if err := node.run(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
 
@@ -109,7 +110,7 @@ func TestUnregisteredMessageType(t *testing.T) {
 
 	input := bytes.NewBuffer(encodeMessage(msg))
 
-	if err := node.run(input); err == nil {
+	if err := node.run(context.Background(), input); err == nil {
 		t.Fatal("expected error, got nil")
 	}
 }
@@ -147,7 +148,7 @@ func TestConcurrentMessageHandling(t *testing.T) {
 			Body: CountMessage{
 				RPCMetadata: RPCMetadata{
 					Type:  "count",
-					MsgID: uint64(i),
+					MsgID: uint(i),
 				},
 				Value: 1,
 			},
@@ -155,7 +156,7 @@ func TestConcurrentMessageHandling(t *testing.T) {
 		input.Write(encodeMessage(msg))
 	}
 
-	if err := node.run(input); err != nil {
+	if err := node.run(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
 
@@ -207,7 +208,7 @@ func TestMalformedMessages(t *testing.T) {
 			node, out := newTestNode()
 			input := bytes.NewBufferString(tt.input + "\n")
 
-			if err := node.run(input); err != nil {
+			if err := node.run(context.Background(), input); err != nil {
 				t.Fatalf("expected nil, got error: %v", err)
 			}
 

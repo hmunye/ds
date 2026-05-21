@@ -40,6 +40,7 @@ package maelstrom
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,7 +57,7 @@ type Node struct {
 	NodeID  string
 	NodeIDs []string
 
-	nextMsgID atomic.Uint64
+	nextMsgID atomic.Uint32
 	out       io.Writer
 	logger    *slog.Logger
 	handlers  map[string]HandlerFunc
@@ -64,8 +65,8 @@ type Node struct {
 }
 
 // NextMsgID atomically increments and returns the next message ID.
-func (n *Node) NextMsgID() uint64 {
-	return uint64(n.nextMsgID.Add(1))
+func (n *Node) NextMsgID() uint {
+	return uint(n.nextMsgID.Add(1))
 }
 
 // NewNode returns a new `Maelstrom` node, whose state is logically finalized
@@ -87,79 +88,94 @@ func newNode(out io.Writer) *Node {
 		handlers: make(map[string]HandlerFunc),
 	}
 
-	// Register default "init" handler.
 	n.handleInit()
-
-	// Register default "error" handler.
 	n.handleError()
 
 	return n
 }
 
 // Run continuously reads `Maelstrom` formatted messages from STDIN, dispatching
-// each to its registered handler. An error is returned if an incoming message
-// type has no corresponding handler registered.
-func (n *Node) Run() error {
-	return n.run(os.Stdin)
+// each to its registered handler.
+//
+// An error is returned if an incoming message type has no corresponding handler
+// registered.
+func (n *Node) Run(ctx context.Context) error {
+	return n.run(ctx, os.Stdin)
 }
 
-func (n *Node) run(reader io.Reader) (err error) {
+func (n *Node) run(ctx context.Context, reader io.Reader) (err error) {
 	var wg sync.WaitGroup
 	scanner := bufio.NewScanner(reader)
+	lines := make(chan []byte)
 
-	for scanner.Scan() {
-		line := []byte(scanner.Text())
+	go func() {
+		defer close(lines)
 
-		var meta struct {
-			Body struct {
-				Type string `json:"type"`
-			} `json:"body"`
+		for scanner.Scan() {
+			lines <- []byte(scanner.Text())
 		}
-		if err := json.Unmarshal(line, &meta); err != nil {
-			slog.Error("failed to decode incoming message type", slog.Any("error", err))
-			continue
-		}
+	}()
 
-		ty := meta.Body.Type
-		if ty == "" {
-			slog.Error("failed to decode incoming message type", slog.String("error", "missing `type` field"))
-			continue
-		}
+outer:
+	for {
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+			break outer
+		case line, ok := <-lines:
+			if !ok {
+				err = scanner.Err()
+				break outer
+			}
 
-		callback, ok := n.handlers[ty]
-		if !ok {
-			err = fmt.Errorf("unregistered type for incoming message: %q", ty)
-			break
-		}
+			var meta struct {
+				Body struct {
+					Type string `json:"type"`
+				} `json:"body"`
+			}
+			if err := json.Unmarshal(line, &meta); err != nil {
+				slog.Error("failed to decode incoming message type", slog.Any("error", err))
+				continue
+			}
 
-		wg.Go(func() {
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("handler panic",
-						slog.String("panic", fmt.Sprint(r)),
+			ty := meta.Body.Type
+			if ty == "" {
+				slog.Error("failed to decode incoming message type", slog.String("error", "missing `type` field"))
+				continue
+			}
+
+			callback, ok := n.handlers[ty]
+			if !ok {
+				err = fmt.Errorf("unregistered type for incoming message: %q", ty)
+				break outer
+			}
+
+			wg.Go(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("handler panic",
+							slog.String("panic", fmt.Sprint(r)),
+							slog.String("type", ty),
+						)
+					}
+				}()
+
+				if err := callback(line); err != nil {
+					slog.Error("failed to process incoming message",
+						slog.Any("error", err),
 						slog.String("type", ty),
 					)
 				}
-			}()
-
-			if err := callback(line); err != nil {
-				slog.Error("failed to process incoming message",
-					slog.Any("error", err),
-					slog.String("type", ty),
-				)
-			}
-		})
+			})
+		}
 	}
 
 	wg.Wait()
 
-	if err == nil {
-		err = scanner.Err()
-	}
-
 	return
 }
 
+// handleInit registers the default "init" message handler.
 func (n *Node) handleInit() {
 	Handle(n, "init", func(incoming Message[initRequest]) error {
 		n.configure(&incoming)
@@ -175,6 +191,7 @@ func (n *Node) handleInit() {
 	})
 }
 
+// handleError registers the default "error" message handler.
 func (n *Node) handleError() {
 	Handle(n, "error", func(incoming Message[ErrorMessage]) error {
 		var msg string
