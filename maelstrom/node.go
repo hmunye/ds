@@ -1,41 +1,35 @@
 // Package maelstrom provides utilities for building message-based nodes
 // (distributed processes) on top of `Maelstrom`.
 //
-// Nodes in a distributed system communicate by exchanging messages. Unlike
-// threads in a single process, nodes cannot directly share memory, which
-// fundamentally shapes how distributed algorithms are designed.
+// Within a single process, threads share the same virtual-address space and can
+// communicate through shared data structures synchronized with primitives such
+// as mutexes. Communication between processes on the same machine typically
+// relies on IPC (Inter-Process Communication) mechanisms such as sockets,
+// pipes, or memory-mapped pages (`mmap`).
 //
-// In a traditional single-machine program, threads operate within the same
-// memory space and can communicate through shared memory. Separate processes
-// on the same host can communicate using mechanisms such as sockets, pipes,
-// or memory-mapped pages (`mmap`).
+// In a distributed system, nodes communicate by exchanging messages over a
+// network. Unlike threads, nodes cannot share memory or directly inspect each
+// other's state, which introduces additional challenges:
 //
-// In a distributed system, each node runs on a different machine with its own
-// memory and execution environment. Communication must happen over a network,
-// which introduces additional challenges:
+//   - Messages may be lost
+//   - Messages may be delayed
+//   - Messages may be received out of order
 //
-//   - messages may be lost
-//   - messages may be delayed
-//   - messages may be received out of order
+// Since nodes cannot rely on shared state, every message must contain enough
+// information for the receiver to interpret it independently. `Maelstrom`
+// models this using a RPC (Remote Procedure Call) protocol, where nodes
+// exchange self-contained JSON messages over STDIN and STDOUT. Each message
+// includes a source (`src`), destination (`dest`), and `body` containing the
+// payload of that request or response.
 //
-// Because nodes cannot directly inspect each other's state, every message must
-// contain enough information for the receiver to process it independently. The
-// `Maelstrom` RPC (Remote Procedure Call) protocol facilitates this by using
-// self-contained JSON objects sent over STDIN and STDOUT. Each message includes
-// `src`, `dest`, and a `body` containing a `type` field and optional payload,
-// allowing nodes to identify the sender, destination, and purpose of the
-// communication without shared state.
+// Requests and responses are correlated using message identifiers such as
+// `msg_id` and `in_reply_to`. A sender attaches a unique identifier to each
+// request, and the receiver includes that identifier in its reply, allowing
+// asynchronous communication without shared state.
 //
-// To handle asynchronous communication and match responses to requests,
-// messages use IDs (e.g., `msg_id`, `in_reply_to`). When a node sends a
-// request, it includes a unique identifier; when the receiver responds, it
-// echoes that identifier back, allowing the sender to correlate the response
-// with its original request.
-//
-// Additionally, `Maelstrom` defines a standard error format using structured
-// error codes (similar to HTTP status codes) rather than human-readable text,
-// enabling nodes to make programmatic decisions about retrying or failing
-// requests based on the nature of the failure (e.g., indefinite or definite).
+// `Maelstrom` also defines structured error codes rather than human-readable
+// messages. This allows nodes to distinguish between different classes of
+// failure and make programmatic decisions about retries, recovery, or crashes.
 package maelstrom
 
 import (
@@ -50,42 +44,35 @@ import (
 	"sync/atomic"
 )
 
-type HandlerFunc func(json.RawMessage) error
+type handlerFunc func(json.RawMessage) error
 
-// Node represents a `Maelstrom` node.
+// Node represents a single `Maelstrom` node.
 type Node struct {
-	NodeID  string
+	// NodeID is the identifier of this node.
+	NodeID string
+	// NodeIDs lists all node IDs in the cluster.
 	NodeIDs []string
 
-	nextMsgID atomic.Uint32
-	out       io.Writer
-	logger    *slog.Logger
-	handlers  map[string]HandlerFunc
-	mu        sync.Mutex
+	msgID    atomic.Uint32
+	logger   *slog.Logger
+	handlers map[string]handlerFunc
+	mu       sync.Mutex
+	out      io.Writer
 }
 
-// NextMsgID atomically increments and returns the next message ID.
-func (n *Node) NextMsgID() uint {
-	return uint(n.nextMsgID.Add(1))
-}
-
-// NewNode returns a new `Maelstrom` node, whose state is logically finalized
-// upon receiving a valid "init" message.
+// NewNode returns a new `Maelstrom` node which writes messages to STDOUT.
 func NewNode() *Node {
 	return newNode(os.Stdout)
 }
 
 func newNode(out io.Writer) *Node {
-	logger := slog.New(slog.NewJSONHandler(
-		os.Stderr,
-		&slog.HandlerOptions{Level: slog.LevelDebug},
-	))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
 
 	n := &Node{
 		out:      out,
 		logger:   logger,
-		handlers: make(map[string]HandlerFunc),
+		handlers: make(map[string]handlerFunc),
 	}
 
 	n.handleInit()
@@ -94,11 +81,10 @@ func newNode(out io.Writer) *Node {
 	return n
 }
 
-// Run continuously reads `Maelstrom` formatted messages from STDIN, dispatching
-// each to its registered handler.
+// Run continuously reads `Maelstrom` messages from STDIN, dispatching each to
+// its registered handler.
 //
-// An error is returned if an incoming message type has no corresponding handler
-// registered.
+// An error is returned if an incoming message type has no registered handler.
 func (n *Node) Run(ctx context.Context) error {
 	return n.run(ctx, os.Stdin)
 }
@@ -144,8 +130,8 @@ outer:
 				continue
 			}
 
-			callback, ok := n.handlers[ty]
-			if !ok {
+			callback, exists := n.handlers[ty]
+			if !exists {
 				err = fmt.Errorf("unregistered type for incoming message: %q", ty)
 				break outer
 			}
@@ -153,8 +139,8 @@ outer:
 			wg.Go(func() {
 				defer func() {
 					if r := recover(); r != nil {
-						slog.Error("handler panic",
-							slog.String("panic", fmt.Sprint(r)),
+						slog.Error("failed to process incoming message",
+							slog.String("error", fmt.Sprint(r)),
 							slog.String("type", ty),
 						)
 					}
@@ -175,25 +161,61 @@ outer:
 	return
 }
 
-// handleInit registers the default "init" message handler.
+// GenerateID returns a globally unique identifier, provided calls to this
+// function are interleaved with [Node.Reply].
+func (n *Node) GenerateID() string {
+	// Generating unique IDs within a program is straightforward. A monotonic
+	// counter or a random `UUID` is usually sufficient. In distributed systems,
+	// however, nodes must generate identifiers independently, without any
+	// shared state.
+	//
+	// Using wall-clock time alone appears to work but fails in practice. Clocks
+	// on different machines are not perfectly synchronized, so two nodes may
+	// generate the same timestamp simultaneously. Also, clock skew and drift
+	// can cause time to move backwards, breaking any monotonicity assumptions.
+	//
+	// Coordination-based approaches, where nodes agree on the next ID through
+	// consensus or a centralized counter, work but introduce additional latency
+	// and complexity. A round-trip between nodes is required for each generated
+	// ID, and the system becomes unavailable under network partitions when
+	// nodes cannot reach a quorum (i.e., the minimum number of nodes required
+	// to make a decision).
+	//
+	// This implementation avoids both problems by combining two values that are
+	// already guaranteed unique within different scopes:
+	//
+	// 	 - NodeID: unique across the entire cluster, assigned by `Maelstrom`
+	// 	 - msgID:  monotonically increasing, unique to a single node
+	//
+	// Together, these values form a globally unique identifier across the
+	// cluster without requiring coordination, shared state, or reliance on
+	// wall-clock time. As a result, ID generation remains available during
+	// network partitions, since each node can continue producing identifiers
+	// independently.
+	//
+	// This approach would not be appropriate when:
+	//
+	//	 - IDs must be time-ordered or sortable by generation time
+	//	 - IDs must be unpredictable (e.g., security tokens, session IDs)
+	//	 - IDs must be compact (e.g., packed into a fixed-width integer)
+	//
+	// In those cases, alternative schemes such as Snowflake (timestamp + node
+	// ID + sequence), `UUID` v4 (random), or consensus-based server-assigned
+	// identifiers are more appropriate, each with different tradeoffs in
+	// coordination, reliance on clocks, and probability of collision.
+	return fmt.Sprintf("%s-%d", n.NodeID, n.msgID.Load())
+}
+
 func (n *Node) handleInit() {
 	Handle(n, "init", func(incoming Message[initRequest]) error {
-		n.configure(&incoming)
+		n.init(incoming.Body.Payload.NodeID, incoming.Body.Payload.NodeIDs)
 
-		body := initResponse{
-			RPCMetadata{
-				Type:      "init_ok",
-				InReplyTo: incoming.Body.MsgID,
-			},
-		}
-
-		return Reply(n, incoming, body)
+		return Reply(n, incoming, "init_ok", EmptyPayload{})
 	})
 }
 
-// handleError registers the default "error" message handler.
 func (n *Node) handleError() {
-	Handle(n, "error", func(incoming Message[ErrorMessage]) error {
+	Handle(n, "error", func(incoming Message[EmptyPayload]) error {
 		var msg string
 		if incoming.Body.Text != "" {
 			msg = incoming.Body.Text
@@ -202,57 +224,70 @@ func (n *Node) handleError() {
 		}
 
 		slog.Error(
-			"incoming \"error\" message",
-			slog.Int("code", int(incoming.Body.Code)),
+			"\"error\" message received",
 			slog.String("error", msg),
+			slog.Int("code", int(incoming.Body.Code)),
 		)
 
 		return nil
 	})
 }
 
-func (n *Node) configure(incoming *Message[initRequest]) {
-	// NOTE: Safe for concurrent use without locks; `Maelstrom` ensures no other
+func (n *Node) init(nodeID string, nodeIDs []string) {
+	// Safe for concurrent use without locks: `Maelstrom` ensures no other
 	// messages are delivered until the node responds to the "init" message.
-	n.NodeID = incoming.Body.NodeID
-	n.NodeIDs = incoming.Body.NodeIDs
+	n.NodeID = nodeID
+	n.NodeIDs = nodeIDs
 
 	n.logger = n.logger.With(slog.String("node_id", n.NodeID))
 	slog.SetDefault(n.logger)
 }
 
-// Send transmits a payload to the specified destination node via STDOUT.
-func Send[Out hasMetadata](n *Node, dst string, payload Out) error {
-	msg := Message[Out]{Src: n.NodeID, Dst: dst, Body: payload}
-
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	_, err = n.out.Write(append(data, '\n'))
-	return err
-}
-
-// Reply transmits a payload in response to an incoming request via STDOUT.
-func Reply[In hasMetadata, Out hasMetadata](n *Node, incoming Message[In], payload Out) error {
-	return Send(n, incoming.Src, payload)
-}
-
-// Handle registers a handler for `Maelstrom` messages of the given type,
-// invoked whenever a message of that type is received. Handlers must be
-// registered before calling [Node.Run].
-func Handle[In hasMetadata](n *Node, msgType string, callback func(Message[In]) error) {
-	n.handlers[msgType] = func(line json.RawMessage) error {
-		var msg Message[In]
+// Handle registers a callback for processing incoming `Maelstrom` messages of
+// the given type, which All handlers must be registered before calling
+// [Node.Run].
+func Handle[T any](n *Node, ty string, callback func(Message[T]) error) {
+	n.handlers[ty] = func(line json.RawMessage) error {
+		var msg Message[T]
 		if err := json.Unmarshal(line, &msg); err != nil {
-			slog.Error("failed to decode incoming message", slog.Any("error", err))
-			return err
+			return fmt.Errorf("failed to decode incoming message: %w", err)
 		}
 
 		return callback(msg)
 	}
+}
+
+// Reply transmits a response for the given incoming message to STDOUT.
+func Reply[T, U any](n *Node, incoming Message[T], ty string, payload U) error {
+	msg := Message[U]{
+		Src: n.NodeID,
+		Dst: incoming.Src,
+	}
+
+	msg.Body.Type = ty
+	msg.Body.MsgID = uint(n.msgID.Add(1))
+	msg.Body.InReplyTo = incoming.Body.MsgID
+	msg.Body.Payload = payload
+
+	return Send(n, msg)
+}
+
+// Send transmits the given message to STDOUT.
+func Send[T any](n *Node, msg Message[T]) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		slog.Error("failed to encode outgoing message",
+			slog.Any("error", err),
+			slog.String("type", msg.Body.Type),
+		)
+		return err
+	}
+
+	data = append(data, '\n')
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	_, err = n.out.Write(data)
+	return err
 }

@@ -1,14 +1,16 @@
-BIN := node
-BUILD_DIR := bin
+BIN = node
+BUILD_DIR = bin
 
+# - go help build
 FLAGS = -trimpath
+# - go tool compile -h
 GCFLAGS = -gcflags=""
+# - go tool link -h
 LDFLAGS = -ldflags=""
 
 FLAGS += $(GCFLAGS) $(LDFLAGS)
 
 .DEFAULT_GOAL := all
-
 .PHONY: all fmt test run lint vuln clean
 
 all: $(BIN)
@@ -28,8 +30,8 @@ run: all
 lint:
 	@golangci-lint run ./...
 
-vuln: lint
+vuln:
 	@govulncheck ./...
 
 clean:
-	@go clean -testcache; rm -rf $(BUILD_DIR)
+	@go clean -testcache; rm -rf $(BUILD_DIR)/

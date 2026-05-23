@@ -13,17 +13,17 @@ import (
 
 func newTestNode() (*Node, *bytes.Buffer) {
 	out := &bytes.Buffer{}
-	node := newNode(out)
+	n := newNode(out)
 
-	return node, out
+	return n, out
 }
 
-func encodeMessage[In hasMetadata](msg Message[In]) []byte {
+func encodeMessage[T any](msg Message[T]) []byte {
 	data, _ := json.Marshal(msg)
 	return append(data, '\n')
 }
 
-func readOutput[T hasMetadata](out *bytes.Buffer) ([]Message[T], error) {
+func readOutput[T any](out *bytes.Buffer) ([]Message[T], error) {
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	msgs := make([]Message[T], 0, len(lines))
 
@@ -40,28 +40,28 @@ func readOutput[T hasMetadata](out *bytes.Buffer) ([]Message[T], error) {
 }
 
 func TestInitMessage(t *testing.T) {
-	node, out := newTestNode()
+	n, out := newTestNode()
 	initMsg := Message[initRequest]{
 		Src: "c1",
 		Dst: "n3",
-		Body: initRequest{
-			RPCMetadata: RPCMetadata{
-				Type:  "init",
-				MsgID: 1,
+		Body: MessageBody[initRequest]{
+			Type:  "init",
+			MsgID: 1,
+			Payload: initRequest{
+				NodeID:  "n3",
+				NodeIDs: []string{"n1", "n2", "n3"},
 			},
-			NodeID:  "n3",
-			NodeIDs: []string{"n1", "n2", "n3"},
 		},
 	}
 
 	input := bytes.NewBuffer(nil)
 	input.Write(encodeMessage(initMsg))
 
-	if err := node.run(context.Background(), input); err != nil {
+	if err := n.run(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
 
-	msgs, err := readOutput[initResponse](out)
+	msgs, err := readOutput[EmptyPayload](out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,93 +70,87 @@ func TestInitMessage(t *testing.T) {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
 
-	resp := msgs[0]
-	if resp.Body.Type != "init_ok" {
-		t.Errorf("expected response type \"init_ok\", got %q", resp.Body.Type)
+	res := msgs[0]
+	if res.Body.Type != "init_ok" {
+		t.Errorf("expected response type \"init_ok\", got %q", res.Body.Type)
 	}
 
-	if resp.Body.InReplyTo != initMsg.Body.MsgID {
-		t.Errorf("expected \"in_reply_to\" value %d, got %d", initMsg.Body.MsgID, resp.Body.InReplyTo)
+	if res.Body.InReplyTo != initMsg.Body.MsgID {
+		t.Errorf("expected \"in_reply_to\" value %d, got %d", initMsg.Body.MsgID, res.Body.InReplyTo)
 	}
 
-	if node.NodeID != "n3" {
-		t.Errorf("expected node ID \"n3\", got %q", node.NodeID)
+	if n.NodeID != "n3" {
+		t.Errorf("expected node ID \"n3\", got %q", n.NodeID)
 	}
 
 	expectedIDs := []string{"n1", "n2", "n3"}
-	if !slices.Equal(node.NodeIDs, expectedIDs) {
-		t.Errorf("expected node IDs %v, got %v", expectedIDs, node.NodeIDs)
+	if !slices.Equal(n.NodeIDs, expectedIDs) {
+		t.Errorf("expected node IDs %v, got %v", expectedIDs, n.NodeIDs)
 	}
 }
 
 func TestUnregisteredMessageType(t *testing.T) {
-	type DummyMessage struct {
-		RPCMetadata
+	type DummyRequest struct {
 		Data string `json:"data"`
 	}
 
-	node, _ := newTestNode()
-	msg := Message[DummyMessage]{
+	n, _ := newTestNode()
+	msg := Message[DummyRequest]{
 		Src: "c1",
 		Dst: "n3",
-		Body: DummyMessage{
-			RPCMetadata: RPCMetadata{
-				Type:  "unknown",
-				MsgID: 1,
+		Body: MessageBody[DummyRequest]{
+			Type:  "unknown",
+			MsgID: 1,
+			Payload: DummyRequest{
+				Data: "hello",
 			},
-			Data: "hello",
 		},
 	}
 
 	input := bytes.NewBuffer(encodeMessage(msg))
 
-	if err := node.run(context.Background(), input); err == nil {
+	if err := n.run(context.Background(), input); err == nil {
 		t.Fatal("expected error, got nil")
 	}
 }
 
 func TestConcurrentMessageHandling(t *testing.T) {
-	const numMessages = 100
-	var mu sync.Mutex
-
-	node, out := newTestNode()
-	counter := 0
-
-	type CountMessage struct {
-		RPCMetadata
+	type CountRequest struct {
 		Value int `json:"value"`
 	}
 
-	Handle(node, "count", func(incoming Message[CountMessage]) error {
+	var mu sync.Mutex
+	const numMessages = 100
+
+	n, out := newTestNode()
+	counter := 0
+
+	Handle(n, "count", func(incoming Message[CountRequest]) error {
 		mu.Lock()
-		counter += incoming.Body.Value
+		counter += incoming.Body.Payload.Value
 		mu.Unlock()
 
-		outgoing := incoming.Body
-		outgoing.Type = "count_ok"
-		outgoing.MsgID = node.NextMsgID()
-		outgoing.InReplyTo = incoming.Body.MsgID
-
-		return Reply(node, incoming, outgoing)
+		return Reply(n, incoming, "count_ok", EmptyPayload{})
 	})
 
 	input := &bytes.Buffer{}
 	for i := 1; i <= numMessages; i++ {
-		msg := Message[CountMessage]{
+		msg := Message[CountRequest]{
 			Src: "c1",
 			Dst: "n3",
-			Body: CountMessage{
-				RPCMetadata: RPCMetadata{
-					Type:  "count",
-					MsgID: uint(i),
+			Body: MessageBody[CountRequest]{
+				Type:  "count",
+				MsgID: uint(i),
+				Payload: CountRequest{
+					Value: 1,
 				},
-				Value: 1,
 			},
 		}
+
 		input.Write(encodeMessage(msg))
 	}
 
-	if err := node.run(context.Background(), input); err != nil {
+	if err := n.run(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
 
@@ -164,7 +158,7 @@ func TestConcurrentMessageHandling(t *testing.T) {
 		t.Errorf("expected counter value %d, got %d", numMessages, counter)
 	}
 
-	msgs, err := readOutput[CountMessage](out)
+	msgs, err := readOutput[CountRequest](out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +197,7 @@ func TestMalformedMessages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+			// t.Parallel()
 
 			node, out := newTestNode()
 			input := bytes.NewBufferString(tt.input + "\n")

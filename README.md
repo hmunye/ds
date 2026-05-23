@@ -1,6 +1,7 @@
 # ds
 
-Building Distributed Systems from Scratch.
+Distributed Systems from scratch using [Gossip Glomers] challenges and the
+[Maelstrom] test framework to learn concepts through hands-on implementation.
 
 ## Quick Start
 
