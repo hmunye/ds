@@ -66,11 +66,11 @@ type gossipRequest struct {
 // Broadcaster maintains the state of the gossip protocol for a given
 // [maelstrom.Node].
 type Broadcaster struct {
-	n        *maelstrom.Node
-	fanout   int
-	interval time.Duration
-	messages map[int]struct{}
-	mu       sync.Mutex
+	n                 *maelstrom.Node
+	fanout            int
+	interval, timeout time.Duration
+	messages          map[int]struct{}
+	mu                sync.Mutex
 }
 
 // New returns a Broadcaster using the given [maelstrom.Node]. The Broadcaster
@@ -80,6 +80,7 @@ func New(n *maelstrom.Node) *Broadcaster {
 		n:        n,
 		fanout:   3,
 		interval: 100 * time.Millisecond,
+		timeout:  time.Second,
 		messages: make(map[int]struct{}),
 	}
 }
@@ -95,6 +96,13 @@ func (b *Broadcaster) WithFanout(f int) *Broadcaster {
 // 100ms.
 func (b *Broadcaster) WithInterval(d time.Duration) *Broadcaster {
 	b.interval = d
+	return b
+}
+
+// WithTimeout sets the duration to wait for a "gossip" response from a peer
+// before giving up. Defaults to 1s.
+func (b *Broadcaster) WithTimeout(d time.Duration) *Broadcaster {
+	b.timeout = d
 	return b
 }
 
@@ -175,8 +183,12 @@ outer:
 								slog.Any("error", err))
 						}
 
-						msg := <-ch
-						slog.Info("received \"gossip\" response", slog.String("type", msg.Body.Type))
+						select {
+						case msg := <-ch:
+							slog.Info("received \"gossip\" response", slog.String("type", msg.Body.Type))
+						case <-time.After(b.timeout):
+							slog.Warn("timeout on waiting for \"gossip\" response")
+						}
 					}()
 				}
 			default:

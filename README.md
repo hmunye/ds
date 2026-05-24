@@ -35,6 +35,12 @@ Maelstrom "broadcast" workload (multi-node):
 ./maelstrom.sh test -w broadcast --bin /bin/node --node-count 5 --time-limit 20 --rate 10
 ```
 
+Maelstrom "broadcast" workload (fault-tolerant):
+
+```bash
+./maelstrom.sh test -w broadcast --bin /bin/node --node-count 5 --time-limit 20 --rate 10 --nemesis partition
+```
+
 ## License
 
 This project is licensed under the [MIT License].
