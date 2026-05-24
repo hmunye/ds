@@ -103,7 +103,7 @@ func (n *Node) run(ctx context.Context, reader io.Reader) (err error) {
 		defer close(lines)
 
 		for scanner.Scan() {
-			lines <- scanner.Bytes()
+			lines <- []byte(scanner.Text())
 		}
 	}()
 

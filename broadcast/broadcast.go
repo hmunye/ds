@@ -69,18 +69,21 @@ type Broadcaster struct {
 	fanout            int
 	interval, timeout time.Duration
 	messages          map[int]struct{} // set for message de-duplication
-	mu                sync.Mutex
+	msgMu             sync.Mutex
+	acknowledged      map[string]map[int]struct{}
+	ackMu             sync.Mutex
 }
 
 // New returns a Broadcaster using the given [maelstrom.Node]. The Broadcaster
 // is not active until [Register] is called.
 func New(n *maelstrom.Node) *Broadcaster {
 	return &Broadcaster{
-		n:        n,
-		fanout:   3,
-		interval: 100 * time.Millisecond,
-		timeout:  time.Second,
-		messages: make(map[int]struct{}),
+		n:            n,
+		fanout:       3,
+		interval:     100 * time.Millisecond,
+		timeout:      time.Second,
+		messages:     make(map[int]struct{}),
+		acknowledged: make(map[string]map[int]struct{}),
 	}
 }
 
@@ -111,9 +114,9 @@ func (b *Broadcaster) WithTimeout(d time.Duration) *Broadcaster {
 func (b *Broadcaster) Start() {
 	maelstrom.Handle(b.n, "broadcast",
 		func(incoming maelstrom.Message[broadcastRequest]) error {
-			b.mu.Lock()
+			b.msgMu.Lock()
 			b.messages[incoming.Body.Payload.Message] = struct{}{}
-			b.mu.Unlock()
+			b.msgMu.Unlock()
 
 			return maelstrom.Reply(b.n, incoming, "broadcast_ok", maelstrom.EmptyPayload{})
 		})
@@ -135,13 +138,13 @@ func (b *Broadcaster) Start() {
 
 	maelstrom.Handle(b.n, "gossip",
 		func(incoming maelstrom.Message[gossipRequest]) error {
-			b.mu.Lock()
+			b.msgMu.Lock()
 
 			for _, msg := range incoming.Body.Payload.Messages {
 				b.messages[msg] = struct{}{}
 			}
 
-			b.mu.Unlock()
+			b.msgMu.Unlock()
 
 			return maelstrom.Reply(b.n, incoming, "gossip_ok", maelstrom.EmptyPayload{})
 		})
@@ -167,10 +170,20 @@ func (b *Broadcaster) gossip() {
 		shufflePeers(peers)
 
 		subset := peers[:min(b.fanout, len(peers))]
-		msgs := b.snapshotMessages()
-		payload := gossipRequest{msgs}
-
 		for _, peer := range subset {
+			b.ackMu.Lock()
+
+			peer_msgs := b.acknowledged[peer]
+			delta := b.deltaMessages(peer_msgs)
+
+			b.ackMu.Unlock()
+
+			if len(delta) == 0 {
+				continue
+			}
+
+			payload := gossipRequest{delta}
+
 			go func() {
 				ch, err := maelstrom.RPC[
 					maelstrom.EmptyPayload,
@@ -183,7 +196,23 @@ func (b *Broadcaster) gossip() {
 
 				select {
 				case msg := <-ch:
-					slog.Info("received \"gossip\" response", slog.String("type", msg.Body.Type))
+					if msg.Body.Type != "gossip_ok" {
+						slog.Warn("received invalid \"gossip\" response", slog.String("type", msg.Body.Type))
+						return
+					}
+
+					b.ackMu.Lock()
+
+					peer_msgs := b.acknowledged[peer]
+					if peer_msgs == nil {
+						peer_msgs = make(map[int]struct{}, len(delta))
+					}
+
+					for _, msg := range delta {
+						peer_msgs[msg] = struct{}{}
+					}
+
+					b.ackMu.Unlock()
 				case <-time.After(b.timeout):
 					slog.Warn("timeout on waiting for \"gossip\" response")
 				}
@@ -192,15 +221,24 @@ func (b *Broadcaster) gossip() {
 	}
 }
 
-func shufflePeers(peers []string) {
-	rand.Shuffle(len(peers), func(i, j int) {
-		peers[i], peers[j] = peers[j], peers[i]
-	})
+func (b *Broadcaster) deltaMessages(peer_msgs map[int]struct{}) []int {
+	b.msgMu.Lock()
+	defer b.msgMu.Unlock()
+
+	delta := make([]int, 0)
+
+	for msg := range b.messages {
+		if _, ok := peer_msgs[msg]; !ok {
+			delta = append(delta, msg)
+		}
+	}
+
+	return delta
 }
 
 func (b *Broadcaster) snapshotMessages() []int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.msgMu.Lock()
+	defer b.msgMu.Unlock()
 
 	msgs := make([]int, 0, len(b.messages))
 
@@ -209,4 +247,10 @@ func (b *Broadcaster) snapshotMessages() []int {
 	}
 
 	return msgs
+}
+
+func shufflePeers(peers []string) {
+	rand.Shuffle(len(peers), func(i, j int) {
+		peers[i], peers[j] = peers[j], peers[i]
+	})
 }

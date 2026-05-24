@@ -44,6 +44,17 @@ Maelstrom "broadcast" workload (fault-tolerant):
 ./maelstrom.sh test -w broadcast --bin /bin/node --node-count 5 --time-limit 20 --rate 10 --nemesis partition
 ```
 
+Maelstrom "broadcast" workload (efficient):
+
+- Messages-per-operation is below 30
+- Median latency is below 400ms
+- Maximum latency is below 600ms
+
+```bash
+./maelstrom.sh test -w broadcast --bin /bin/node --node-count 25 --time-limit 20 --rate 100 --latency 100
+```
+> Configured `WithFanout` to 4, `WithInterval` to 120ms
+
 ## License
 
 This project is licensed under the [MIT License].
