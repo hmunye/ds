@@ -3,6 +3,9 @@
 Distributed Systems from scratch using [Gossip Glomers] challenges and the
 [Maelstrom] test framework to learn concepts through hands-on implementation.
 
+[Gossip Glomers]: https://fly.io/dist-sys/
+[Maelstrom]: https://github.com/jepsen-io/maelstrom
+
 ## Quick Start
 
 Build the Docker image containing Maelstrom:
