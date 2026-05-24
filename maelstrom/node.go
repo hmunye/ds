@@ -95,6 +95,7 @@ func (n *Node) Run(ctx context.Context) error {
 
 func (n *Node) run(ctx context.Context, reader io.Reader) (err error) {
 	var wg sync.WaitGroup
+
 	scanner := bufio.NewScanner(reader)
 	lines := make(chan []byte)
 
@@ -102,16 +103,13 @@ func (n *Node) run(ctx context.Context, reader io.Reader) (err error) {
 		defer close(lines)
 
 		for scanner.Scan() {
-			lines <- []byte(scanner.Text())
+			lines <- scanner.Bytes()
 		}
 	}()
 
 outer:
 	for {
 		select {
-		case <-ctx.Done():
-			err = ctx.Err()
-			break outer
 		case line, ok := <-lines:
 			if !ok {
 				err = scanner.Err()
@@ -138,14 +136,17 @@ outer:
 			replyID := meta.Body.InReplyTo
 			if replyID != 0 {
 				n.callbacksMu.Lock()
-
 				callback, exists := n.callbacks[replyID]
 				delete(n.callbacks, replyID)
 
 				n.callbacksMu.Unlock()
 
 				if !exists {
-					slog.Warn("ignoring response", slog.Int("in_reply_to", int(replyID)))
+					slog.Warn(
+						"ignoring incoming response",
+						slog.Int("in_reply_to", int(replyID)),
+						slog.String("type", ty),
+					)
 					continue
 				}
 
@@ -159,12 +160,33 @@ outer:
 
 				processMessage(&wg, line, handler)
 			}
+		case <-ctx.Done():
+			err = ctx.Err()
+			break outer
 		}
 	}
 
 	wg.Wait()
 
 	return
+}
+
+func processMessage(wg *sync.WaitGroup, line json.RawMessage, fn processFunc) {
+	wg.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("failed to process incoming message",
+					slog.String("error", fmt.Sprint(r)),
+				)
+			}
+		}()
+
+		if err := fn(line); err != nil {
+			slog.Error("failed to process incoming message",
+				slog.Any("error", err),
+			)
+		}
+	})
 }
 
 // GUID returns a globally unique identifier, provided calls to this function
@@ -246,8 +268,7 @@ func (n *Node) init(nodeID string, nodeIDs []string) {
 	n.NodeIDs = nodeIDs
 
 	// Remove this node from the cluster list.
-	i := slices.Index(n.NodeIDs, n.NodeID)
-	if i != -1 {
+	if i := slices.Index(n.NodeIDs, n.NodeID); i != -1 {
 		n.NodeIDs = slices.Delete(n.NodeIDs, i, i+1)
 	}
 
@@ -255,9 +276,9 @@ func (n *Node) init(nodeID string, nodeIDs []string) {
 	slog.SetDefault(n.logger)
 }
 
-// Handle registers a callback for processing incoming `Maelstrom` messages of
-// the given type, which All handlers must be registered before calling
-// [Node.Run].
+// Handle registers a handler for processing incoming `Maelstrom` messages of
+// the given type. Existing handlers for the same message type are overwritten.
+// All handlers must be registered before calling [Node.Run].
 func Handle[T any](n *Node, ty string, handler func(Message[T]) error) {
 	n.handlers[ty] = func(line json.RawMessage) error {
 		var msg Message[T]
@@ -267,18 +288,6 @@ func Handle[T any](n *Node, ty string, handler func(Message[T]) error) {
 
 		return handler(msg)
 	}
-}
-
-// Reply transmits a response for the given incoming message.
-func Reply[T, U any](n *Node, incoming Message[T], ty string, payload U) error {
-	body := MessageBody[U]{
-		Type:      ty,
-		MsgID:     uint(n.msgID.Add(1)),
-		InReplyTo: incoming.Body.MsgID,
-		Payload:   payload,
-	}
-
-	return Send(n, incoming.Src, body)
 }
 
 // Send transmits a message body to the given destination node.
@@ -307,16 +316,32 @@ func Send[T any](n *Node, dst string, body MessageBody[T]) error {
 	return err
 }
 
-// RPC transmits a message asynchronously to the given destination node,
-// returning a channel that receives the typed message response.
-func RPC[T, U any](n *Node, dst, ty string, payload T) (<-chan Message[U], error) {
-	ch := make(chan Message[U], 1)
-	nextId := uint(n.msgID.Add(1))
+// Reply transmits a response for the given incoming message.
+func Reply[T, U any](n *Node, incoming Message[T], ty string, payload U) error {
+	id := uint(n.msgID.Add(1))
+
+	body := MessageBody[U]{
+		Type:      ty,
+		MsgID:     id,
+		InReplyTo: incoming.Body.MsgID,
+		Payload:   payload,
+	}
+
+	return Send(n, incoming.Src, body)
+}
+
+// RPC transmits a message asynchronously to the given destination node and
+// returns a channel that will receive the corresponding typed response.
+func RPC[T, U any](n *Node, dst, ty string, payload U) (<-chan Message[T], error) {
+	id := uint(n.msgID.Add(1))
+	ch := make(chan Message[T], 1)
 
 	n.callbacksMu.Lock()
 
-	n.callbacks[nextId] = func(line json.RawMessage) error {
-		var msg Message[U]
+	// TODO: Add timeout-based cleanup for callbacks with no response (prevent
+	// leaks).
+	n.callbacks[id] = func(line json.RawMessage) error {
+		var msg Message[T]
 		if err := json.Unmarshal(line, &msg); err != nil {
 			return fmt.Errorf("failed to decode incoming response: %w", err)
 		}
@@ -327,29 +352,11 @@ func RPC[T, U any](n *Node, dst, ty string, payload T) (<-chan Message[U], error
 
 	n.callbacksMu.Unlock()
 
-	body := MessageBody[T]{
+	body := MessageBody[U]{
 		Type:    ty,
-		MsgID:   nextId,
+		MsgID:   id,
 		Payload: payload,
 	}
 
 	return ch, Send(n, dst, body)
-}
-
-func processMessage(wg *sync.WaitGroup, line json.RawMessage, fn processFunc) {
-	wg.Go(func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("failed to process incoming message",
-					slog.String("error", fmt.Sprint(r)),
-				)
-			}
-		}()
-
-		if err := fn(line); err != nil {
-			slog.Error("failed to process incoming message",
-				slog.Any("error", err),
-			)
-		}
-	})
 }

@@ -40,6 +40,7 @@ func main() {
 
 	broadcast.New(n).
 		WithFanout(3).
+		WithTimeout(time.Second).
 		WithInterval(100 * time.Millisecond).
 		Start()
 

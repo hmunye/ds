@@ -37,7 +37,6 @@
 package broadcast
 
 import (
-	"context"
 	"log/slog"
 	"math/rand"
 	"slices"
@@ -69,7 +68,7 @@ type Broadcaster struct {
 	n                 *maelstrom.Node
 	fanout            int
 	interval, timeout time.Duration
-	messages          map[int]struct{}
+	messages          map[int]struct{} // set for message de-duplication
 	mu                sync.Mutex
 }
 
@@ -85,8 +84,8 @@ func New(n *maelstrom.Node) *Broadcaster {
 	}
 }
 
-// WithFanout sets the number of peers to gossip with each interval. Defaults to
-// 3.
+// WithFanout sets the number of peers to gossip with on each interval. The
+// effective value is capped at the number of available peers. Defaults to 3.
 func (b *Broadcaster) WithFanout(f int) *Broadcaster {
 	b.fanout = f
 	return b
@@ -122,7 +121,7 @@ func (b *Broadcaster) Start() {
 	maelstrom.Handle(b.n, "read",
 		func(incoming maelstrom.Message[maelstrom.EmptyPayload]) error {
 			payload := readResponse{
-				Messages: b.messagesToSlice(),
+				Messages: b.snapshotMessages(),
 			}
 
 			return maelstrom.Reply(b.n, incoming, "read_ok", payload)
@@ -153,64 +152,58 @@ func (b *Broadcaster) Start() {
 func (b *Broadcaster) gossip() {
 	var peers []string
 
-	ctx := context.Background()
 	ticker := time.NewTicker(b.interval)
 	defer ticker.Stop()
 
-outer:
-	for {
-		select {
-		case <-ticker.C:
-			switch {
-			case peers == nil && len(b.n.NodeIDs) > 0:
-				peers = slices.Clone(b.n.NodeIDs)
-			case peers != nil:
-				b.shufflePeers(peers)
-
-				subset := peers[:min(b.fanout, len(peers))]
-
-				msgs := b.messagesToSlice()
-				payload := gossipRequest{msgs}
-
-				for _, peer := range subset {
-					go func() {
-						ch, err := maelstrom.RPC[
-							gossipRequest,
-							maelstrom.EmptyPayload,
-						](b.n, peer, "gossip", payload)
-						if err != nil {
-							slog.Error("failed to send \"gossip\" request",
-								slog.Any("error", err))
-						}
-
-						select {
-						case msg := <-ch:
-							slog.Info("received \"gossip\" response", slog.String("type", msg.Body.Type))
-						case <-time.After(b.timeout):
-							slog.Warn("timeout on waiting for \"gossip\" response")
-						}
-					}()
-				}
-			default:
+	for range ticker.C {
+		if peers == nil {
+			if len(b.n.NodeIDs) == 0 {
 				continue
 			}
-		case <-ctx.Done():
-			break outer
+
+			peers = slices.Clone(b.n.NodeIDs)
+		}
+
+		shufflePeers(peers)
+
+		subset := peers[:min(b.fanout, len(peers))]
+		msgs := b.snapshotMessages()
+		payload := gossipRequest{msgs}
+
+		for _, peer := range subset {
+			go func() {
+				ch, err := maelstrom.RPC[
+					maelstrom.EmptyPayload,
+					gossipRequest,
+				](b.n, peer, "gossip", payload)
+				if err != nil {
+					slog.Error("failed to send \"gossip\" request",
+						slog.Any("error", err))
+				}
+
+				select {
+				case msg := <-ch:
+					slog.Info("received \"gossip\" response", slog.String("type", msg.Body.Type))
+				case <-time.After(b.timeout):
+					slog.Warn("timeout on waiting for \"gossip\" response")
+				}
+			}()
 		}
 	}
 }
 
-func (b *Broadcaster) shufflePeers(peers []string) {
+func shufflePeers(peers []string) {
 	rand.Shuffle(len(peers), func(i, j int) {
 		peers[i], peers[j] = peers[j], peers[i]
 	})
 }
 
-func (b *Broadcaster) messagesToSlice() []int {
+func (b *Broadcaster) snapshotMessages() []int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	msgs := make([]int, 0, len(b.messages))
+
 	for k := range b.messages {
 		msgs = append(msgs, k)
 	}
