@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/hmunye/ds/broadcast"
 	"github.com/hmunye/ds/maelstrom"
 )
 
@@ -31,10 +32,12 @@ func main() {
 	})
 
 	maelstrom.Handle(n, "generate", func(incoming maelstrom.Message[maelstrom.EmptyPayload]) error {
-		payload := GenerateResponse{ID: n.GenerateID()}
+		payload := GenerateResponse{ID: n.GUID()}
 
 		return maelstrom.Reply(n, incoming, "generate_ok", payload)
 	})
+
+	broadcast.New(n).Register()
 
 	if err := n.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("node failed", slog.Any("error", err))

@@ -161,9 +161,9 @@ outer:
 	return
 }
 
-// GenerateID returns a globally unique identifier, provided calls to this
-// function are interleaved with [Node.Reply].
-func (n *Node) GenerateID() string {
+// GUID returns a globally unique identifier, provided calls to this function
+// are interleaved with [Node.Reply].
+func (n *Node) GUID() string {
 	// Generating unique IDs within a program is straightforward. A monotonic
 	// counter or a random `UUID` is usually sufficient. In distributed systems,
 	// however, nodes must generate identifiers independently, without any
@@ -257,7 +257,7 @@ func Handle[T any](n *Node, ty string, callback func(Message[T]) error) {
 	}
 }
 
-// Reply transmits a response for the given incoming message to STDOUT.
+// Reply transmits a response for the given incoming message via STDOUT.
 func Reply[T, U any](n *Node, incoming Message[T], ty string, payload U) error {
 	msg := Message[U]{
 		Src: n.NodeID,
@@ -269,11 +269,6 @@ func Reply[T, U any](n *Node, incoming Message[T], ty string, payload U) error {
 	msg.Body.InReplyTo = incoming.Body.MsgID
 	msg.Body.Payload = payload
 
-	return Send(n, msg)
-}
-
-// Send transmits the given message to STDOUT.
-func Send[T any](n *Node, msg Message[T]) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		slog.Error("failed to encode outgoing message",
@@ -283,11 +278,38 @@ func Send[T any](n *Node, msg Message[T]) error {
 		return err
 	}
 
+	return n.writeData(data)
+}
+
+// Send transmits a fire-and-forget message to the given destination node via
+// STDOUT.
+func Send[T any](n *Node, dst, ty string, payload T) error {
+	msg := Message[T]{
+		Src: n.NodeID,
+		Dst: dst,
+	}
+
+	msg.Body.Type = ty
+	msg.Body.Payload = payload
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		slog.Error("failed to encode outgoing message",
+			slog.Any("error", err),
+			slog.String("type", msg.Body.Type),
+		)
+		return err
+	}
+
+	return n.writeData(data)
+}
+
+func (n *Node) writeData(data []byte) error {
 	data = append(data, '\n')
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	_, err = n.out.Write(data)
+	_, err := n.out.Write(data)
 	return err
 }

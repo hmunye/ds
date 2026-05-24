@@ -23,6 +23,12 @@ Maelstrom "unique-ids" workload:
 ./maelstrom.sh test -w unique-ids --bin /bin/node --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
 ```
 
+Maelstrom "broadcast" workload (single-node):
+
+```bash
+./maelstrom.sh test -w broadcast --bin /bin/node --node-count 1 --time-limit 20 --rate 10
+```
+
 ## License
 
 This project is licensed under the [MIT License].
