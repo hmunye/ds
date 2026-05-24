@@ -37,6 +37,13 @@
 package broadcast
 
 import (
+	"context"
+	"log/slog"
+	"math/rand"
+	"slices"
+	"sync"
+	"time"
+
 	"github.com/hmunye/ds/maelstrom"
 )
 
@@ -52,11 +59,18 @@ type readResponse struct {
 	Messages []int `json:"messages"`
 }
 
+type gossipRequest struct {
+	Messages []int `json:"messages"`
+}
+
 // Broadcaster maintains the state of the gossip protocol for a given
 // [maelstrom.Node].
 type Broadcaster struct {
 	n        *maelstrom.Node
-	messages []int
+	fanout   int
+	interval time.Duration
+	messages map[int]struct{}
+	mu       sync.Mutex
 }
 
 // New returns a Broadcaster using the given [maelstrom.Node]. The Broadcaster
@@ -64,16 +78,35 @@ type Broadcaster struct {
 func New(n *maelstrom.Node) *Broadcaster {
 	return &Broadcaster{
 		n:        n,
-		messages: make([]int, 0),
+		fanout:   3,
+		interval: 100 * time.Millisecond,
+		messages: make(map[int]struct{}),
 	}
 }
 
-// Register installs the "broadcast", "topology", and "read" handlers on the
-// [maelstrom.Node].
-func (b *Broadcaster) Register() {
+// WithFanout sets the number of peers to gossip with each interval. Defaults to
+// 3.
+func (b *Broadcaster) WithFanout(f int) *Broadcaster {
+	b.fanout = f
+	return b
+}
+
+// WithInterval sets how frequently the node gossips with its peers. Defaults to
+// 100ms.
+func (b *Broadcaster) WithInterval(d time.Duration) *Broadcaster {
+	b.interval = d
+	return b
+}
+
+// Start registers the "broadcast", "topology", "read", and "gossip" handlers on
+// the [maelstrom.Node] and periodically sends messages to its peers in the
+// background. Must be called before [maelstrom.Node.Run].
+func (b *Broadcaster) Start() {
 	maelstrom.Handle(b.n, "broadcast",
 		func(incoming maelstrom.Message[broadcastRequest]) error {
-			b.messages = append(b.messages, incoming.Body.Payload.Message)
+			b.mu.Lock()
+			b.messages[incoming.Body.Payload.Message] = struct{}{}
+			b.mu.Unlock()
 
 			return maelstrom.Reply(b.n, incoming, "broadcast_ok", maelstrom.EmptyPayload{})
 		})
@@ -81,7 +114,7 @@ func (b *Broadcaster) Register() {
 	maelstrom.Handle(b.n, "read",
 		func(incoming maelstrom.Message[maelstrom.EmptyPayload]) error {
 			payload := readResponse{
-				Messages: b.messages,
+				Messages: b.messagesToSlice(),
 			}
 
 			return maelstrom.Reply(b.n, incoming, "read_ok", payload)
@@ -89,7 +122,86 @@ func (b *Broadcaster) Register() {
 
 	maelstrom.Handle(b.n, "topology",
 		func(incoming maelstrom.Message[topologyRequest]) error {
-			// Ignoring the provided topology.
+			// Ignoring the topology given in favor of random subset of peers.
 			return maelstrom.Reply(b.n, incoming, "topology_ok", maelstrom.EmptyPayload{})
 		})
+
+	maelstrom.Handle(b.n, "gossip",
+		func(incoming maelstrom.Message[gossipRequest]) error {
+			b.mu.Lock()
+
+			for _, msg := range incoming.Body.Payload.Messages {
+				b.messages[msg] = struct{}{}
+			}
+
+			b.mu.Unlock()
+
+			return maelstrom.Reply(b.n, incoming, "gossip_ok", maelstrom.EmptyPayload{})
+		})
+
+	go b.gossip()
+}
+
+func (b *Broadcaster) gossip() {
+	var peers []string
+
+	ctx := context.Background()
+	ticker := time.NewTicker(b.interval)
+	defer ticker.Stop()
+
+outer:
+	for {
+		select {
+		case <-ticker.C:
+			switch {
+			case peers == nil && len(b.n.NodeIDs) > 0:
+				peers = slices.Clone(b.n.NodeIDs)
+			case peers != nil:
+				b.shufflePeers(peers)
+
+				subset := peers[:min(b.fanout, len(peers))]
+
+				msgs := b.messagesToSlice()
+				payload := gossipRequest{msgs}
+
+				for _, peer := range subset {
+					go func() {
+						ch, err := maelstrom.RPC[
+							gossipRequest,
+							maelstrom.EmptyPayload,
+						](b.n, peer, "gossip", payload)
+						if err != nil {
+							slog.Error("failed to send \"gossip\" request",
+								slog.Any("error", err))
+						}
+
+						msg := <-ch
+						slog.Info("received \"gossip\" response", slog.String("type", msg.Body.Type))
+					}()
+				}
+			default:
+				continue
+			}
+		case <-ctx.Done():
+			break outer
+		}
+	}
+}
+
+func (b *Broadcaster) shufflePeers(peers []string) {
+	rand.Shuffle(len(peers), func(i, j int) {
+		peers[i], peers[j] = peers[j], peers[i]
+	})
+}
+
+func (b *Broadcaster) messagesToSlice() []int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	msgs := make([]int, 0, len(b.messages))
+	for k := range b.messages {
+		msgs = append(msgs, k)
+	}
+
+	return msgs
 }

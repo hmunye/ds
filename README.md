@@ -29,6 +29,12 @@ Maelstrom "broadcast" workload (single-node):
 ./maelstrom.sh test -w broadcast --bin /bin/node --node-count 1 --time-limit 20 --rate 10
 ```
 
+Maelstrom "broadcast" workload (multi-node):
+
+```bash
+./maelstrom.sh test -w broadcast --bin /bin/node --node-count 5 --time-limit 20 --rate 10
+```
+
 ## License
 
 This project is licensed under the [MIT License].

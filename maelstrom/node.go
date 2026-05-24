@@ -40,24 +40,27 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
 
-type handlerFunc func(json.RawMessage) error
+type processFunc func(json.RawMessage) error
 
 // Node represents a single `Maelstrom` node.
 type Node struct {
 	// NodeID is the identifier of this node.
 	NodeID string
-	// NodeIDs lists all node IDs in the cluster.
+	// NodeIDs lists all node IDs in the cluster (excluding this node).
 	NodeIDs []string
 
-	msgID    atomic.Uint32
-	logger   *slog.Logger
-	handlers map[string]handlerFunc
-	mu       sync.Mutex
-	out      io.Writer
+	msgID       atomic.Uint32
+	handlers    map[string]processFunc
+	callbacks   map[uint]processFunc
+	callbacksMu sync.Mutex
+	out         io.Writer
+	outMu       sync.Mutex
+	logger      *slog.Logger
 }
 
 // NewNode returns a new `Maelstrom` node which writes messages to STDOUT.
@@ -70,9 +73,10 @@ func newNode(out io.Writer) *Node {
 	slog.SetDefault(logger)
 
 	n := &Node{
-		out:      out,
-		logger:   logger,
-		handlers: make(map[string]handlerFunc),
+		out:       out,
+		logger:    logger,
+		handlers:  make(map[string]processFunc),
+		callbacks: make(map[uint]processFunc),
 	}
 
 	n.handleInit()
@@ -116,7 +120,8 @@ outer:
 
 			var meta struct {
 				Body struct {
-					Type string `json:"type"`
+					Type      string `json:"type"`
+					InReplyTo uint   `json:"in_reply_to"`
 				} `json:"body"`
 			}
 			if err := json.Unmarshal(line, &meta); err != nil {
@@ -130,29 +135,30 @@ outer:
 				continue
 			}
 
-			callback, exists := n.handlers[ty]
-			if !exists {
-				err = fmt.Errorf("unregistered type for incoming message: %q", ty)
-				break outer
-			}
+			replyID := meta.Body.InReplyTo
+			if replyID != 0 {
+				n.callbacksMu.Lock()
 
-			wg.Go(func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("failed to process incoming message",
-							slog.String("error", fmt.Sprint(r)),
-							slog.String("type", ty),
-						)
-					}
-				}()
+				callback, exists := n.callbacks[replyID]
+				delete(n.callbacks, replyID)
 
-				if err := callback(line); err != nil {
-					slog.Error("failed to process incoming message",
-						slog.Any("error", err),
-						slog.String("type", ty),
-					)
+				n.callbacksMu.Unlock()
+
+				if !exists {
+					slog.Warn("ignoring response", slog.Int("in_reply_to", int(replyID)))
+					continue
 				}
-			})
+
+				processMessage(&wg, line, callback)
+			} else {
+				handler, exists := n.handlers[ty]
+				if !exists {
+					err = fmt.Errorf("unregistered type for incoming message: %q", ty)
+					break outer
+				}
+
+				processMessage(&wg, line, handler)
+			}
 		}
 	}
 
@@ -239,6 +245,12 @@ func (n *Node) init(nodeID string, nodeIDs []string) {
 	n.NodeID = nodeID
 	n.NodeIDs = nodeIDs
 
+	// Remove this node from the cluster list.
+	i := slices.Index(n.NodeIDs, n.NodeID)
+	if i != -1 {
+		n.NodeIDs = slices.Delete(n.NodeIDs, i, i+1)
+	}
+
 	n.logger = n.logger.With(slog.String("node_id", n.NodeID))
 	slog.SetDefault(n.logger)
 }
@@ -246,51 +258,36 @@ func (n *Node) init(nodeID string, nodeIDs []string) {
 // Handle registers a callback for processing incoming `Maelstrom` messages of
 // the given type, which All handlers must be registered before calling
 // [Node.Run].
-func Handle[T any](n *Node, ty string, callback func(Message[T]) error) {
+func Handle[T any](n *Node, ty string, handler func(Message[T]) error) {
 	n.handlers[ty] = func(line json.RawMessage) error {
 		var msg Message[T]
 		if err := json.Unmarshal(line, &msg); err != nil {
-			return fmt.Errorf("failed to decode incoming message: %w", err)
+			return fmt.Errorf("failed to decode incoming request: %w", err)
 		}
 
-		return callback(msg)
+		return handler(msg)
 	}
 }
 
-// Reply transmits a response for the given incoming message via STDOUT.
+// Reply transmits a response for the given incoming message.
 func Reply[T, U any](n *Node, incoming Message[T], ty string, payload U) error {
-	msg := Message[U]{
-		Src: n.NodeID,
-		Dst: incoming.Src,
+	body := MessageBody[U]{
+		Type:      ty,
+		MsgID:     uint(n.msgID.Add(1)),
+		InReplyTo: incoming.Body.MsgID,
+		Payload:   payload,
 	}
 
-	msg.Body.Type = ty
-	msg.Body.MsgID = uint(n.msgID.Add(1))
-	msg.Body.InReplyTo = incoming.Body.MsgID
-	msg.Body.Payload = payload
-
-	data, err := json.Marshal(msg)
-	if err != nil {
-		slog.Error("failed to encode outgoing message",
-			slog.Any("error", err),
-			slog.String("type", msg.Body.Type),
-		)
-		return err
-	}
-
-	return n.writeData(data)
+	return Send(n, incoming.Src, body)
 }
 
-// Send transmits a fire-and-forget message to the given destination node via
-// STDOUT.
-func Send[T any](n *Node, dst, ty string, payload T) error {
+// Send transmits a message body to the given destination node.
+func Send[T any](n *Node, dst string, body MessageBody[T]) error {
 	msg := Message[T]{
-		Src: n.NodeID,
-		Dst: dst,
+		Src:  n.NodeID,
+		Dst:  dst,
+		Body: body,
 	}
-
-	msg.Body.Type = ty
-	msg.Body.Payload = payload
 
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -301,15 +298,58 @@ func Send[T any](n *Node, dst, ty string, payload T) error {
 		return err
 	}
 
-	return n.writeData(data)
-}
-
-func (n *Node) writeData(data []byte) error {
 	data = append(data, '\n')
 
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.outMu.Lock()
+	defer n.outMu.Unlock()
 
-	_, err := n.out.Write(data)
+	_, err = n.out.Write(data)
 	return err
+}
+
+// RPC transmits a message asynchronously to the given destination node,
+// returning a channel that receives the typed message response.
+func RPC[T, U any](n *Node, dst, ty string, payload T) (<-chan Message[U], error) {
+	ch := make(chan Message[U], 1)
+	nextId := uint(n.msgID.Add(1))
+
+	n.callbacksMu.Lock()
+
+	n.callbacks[nextId] = func(line json.RawMessage) error {
+		var msg Message[U]
+		if err := json.Unmarshal(line, &msg); err != nil {
+			return fmt.Errorf("failed to decode incoming response: %w", err)
+		}
+
+		ch <- msg
+		return nil
+	}
+
+	n.callbacksMu.Unlock()
+
+	body := MessageBody[T]{
+		Type:    ty,
+		MsgID:   nextId,
+		Payload: payload,
+	}
+
+	return ch, Send(n, dst, body)
+}
+
+func processMessage(wg *sync.WaitGroup, line json.RawMessage, fn processFunc) {
+	wg.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("failed to process incoming message",
+					slog.String("error", fmt.Sprint(r)),
+				)
+			}
+		}()
+
+		if err := fn(line); err != nil {
+			slog.Error("failed to process incoming message",
+				slog.Any("error", err),
+			)
+		}
+	})
 }
