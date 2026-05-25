@@ -62,6 +62,12 @@ Part II: (`WithFanout`=3, `WithInterval`=150ms)
 - Median latency is below 1 second
 - Maximum latency is below 2 seconds
 
+Maelstrom "g-counter" workload:
+
+```bash
+./maelstrom.sh test -w g-counter --bin /bin/node --node-count 3 --rate 100 --time-limit 20 --nemesis partition
+```
+
 ## License
 
 This project is licensed under the [MIT License].

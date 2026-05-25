@@ -195,12 +195,7 @@ func (b *Broadcaster) gossip() {
 				}
 
 				select {
-				case msg := <-ch:
-					if msg.Body.Type != "gossip_ok" {
-						slog.Warn("received invalid \"gossip\" response", slog.String("type", msg.Body.Type))
-						return
-					}
-
+				case <-ch:
 					b.ackMu.Lock()
 
 					peer_msgs := b.acknowledged[peer]

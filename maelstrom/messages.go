@@ -10,6 +10,26 @@ type initRequest struct {
 	NodeIDs []string `json:"node_ids"`
 }
 
+type kvReadRequest struct {
+	Key string `json:"key"`
+}
+
+type kvReadResponse[T any] struct {
+	Value T `json:"value"`
+}
+
+type kvWriteRequest[T any] struct {
+	Key   string `json:"key"`
+	Value T      `json:"value"`
+}
+
+type kvCASRequest[T any] struct {
+	Key               string `json:"key"`
+	From              T      `json:"from"`
+	To                T      `json:"to"`
+	CreateIfNotExists bool   `json:"create_if_not_exists,omitempty"`
+}
+
 // EmptyPayload represents a [Message] with no expected payload.
 type EmptyPayload struct{}
 
@@ -24,12 +44,12 @@ type Message[T any] struct {
 // MessageBody represents fields common to each `Maelstrom` message, with a
 // generic payload.
 type MessageBody[T any] struct {
-	Type      string    `json:"type"`
-	MsgID     uint      `json:"msg_id,omitempty"`
-	InReplyTo uint      `json:"in_reply_to,omitempty"`
-	Code      ErrorCode `json:"code,omitempty"`
-	Text      string    `json:"text,omitempty"`
-	Payload   T         `json:"-"`
+	Type      string     `json:"type"`
+	MsgID     uint       `json:"msg_id,omitempty"`
+	InReplyTo uint       `json:"in_reply_to,omitempty"`
+	Code      *ErrorCode `json:"code,omitempty"`
+	Text      string     `json:"text,omitempty"`
+	Payload   T          `json:"-"`
 }
 
 func (body MessageBody[T]) MarshalJSON() ([]byte, error) {
@@ -57,7 +77,7 @@ func (body MessageBody[T]) MarshalJSON() ([]byte, error) {
 		out["in_reply_to"] = body.InReplyTo
 	}
 
-	if body.Code != 0 {
+	if body.Code != nil {
 		out["code"] = body.Code
 	}
 
@@ -78,11 +98,11 @@ func (body MessageBody[T]) MarshalJSON() ([]byte, error) {
 
 func (body *MessageBody[T]) UnmarshalJSON(data []byte) error {
 	type meta struct {
-		Type      string    `json:"type"`
-		MsgID     uint      `json:"msg_id"`
-		InReplyTo uint      `json:"in_reply_to"`
-		Code      ErrorCode `json:"code"`
-		Text      string    `json:"text"`
+		Type      string     `json:"type"`
+		MsgID     uint       `json:"msg_id"`
+		InReplyTo uint       `json:"in_reply_to"`
+		Code      *ErrorCode `json:"code"`
+		Text      string     `json:"text"`
 	}
 
 	var m meta

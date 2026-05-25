@@ -88,7 +88,7 @@ func newNode(out io.Writer) *Node {
 // Run continuously reads `Maelstrom` messages from STDIN, dispatching each to
 // its registered handler.
 //
-// An error is returned if an incoming message type has no registered handler.
+// Returns an error if an incoming message type has no registered handler.
 func (n *Node) Run(ctx context.Context) error {
 	return n.run(ctx, os.Stdin)
 }
@@ -254,7 +254,7 @@ func (n *Node) handleError() {
 		slog.Error(
 			"\"error\" message received",
 			slog.String("error", msg),
-			slog.Int("code", int(incoming.Body.Code)),
+			slog.Int("code", int(*incoming.Body.Code)),
 		)
 
 		return nil
