@@ -6,7 +6,7 @@ Distributed Systems from scratch using [Gossip Glomers] challenges and the
 [Gossip Glomers]: https://fly.io/dist-sys/
 [Maelstrom]: https://github.com/jepsen-io/maelstrom
 
-## Quick Start
+## Challenges
 
 Build the Docker image containing Maelstrom:
 
@@ -46,14 +46,21 @@ Maelstrom "broadcast" workload (fault-tolerant):
 
 Maelstrom "broadcast" workload (efficient):
 
+```bash
+./maelstrom.sh test -w broadcast --bin /bin/node --node-count 25 --time-limit 20 --rate 100 --latency 100
+```
+
+Part I: (`WithFanout`=4, `WithInterval`=120ms)
+
 - Messages-per-operation is below 30
 - Median latency is below 400ms
 - Maximum latency is below 600ms
 
-```bash
-./maelstrom.sh test -w broadcast --bin /bin/node --node-count 25 --time-limit 20 --rate 100 --latency 100
-```
-> Configured `WithFanout` to 4, `WithInterval` to 120ms
+Part II: (`WithFanout`=3, `WithInterval`=150ms)
+
+- Messages-per-operation is below 20
+- Median latency is below 1 second
+- Maximum latency is below 2 seconds
 
 ## License
 

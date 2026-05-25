@@ -39,8 +39,8 @@ func main() {
 	})
 
 	broadcast.New(n).
-		WithFanout(4).
-		WithInterval(120 * time.Millisecond).
+		WithFanout(3).
+		WithInterval(150 * time.Millisecond).
 		Start()
 
 	if err := n.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
