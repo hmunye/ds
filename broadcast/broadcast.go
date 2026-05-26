@@ -165,6 +165,11 @@ func (b *Broadcaster) gossip() {
 			}
 
 			peers = slices.Clone(b.n.NodeIDs)
+
+			// Remove this node from the peers list.
+			if i := slices.Index(peers, b.n.NodeID); i != -1 {
+				peers = slices.Delete(peers, i, i+1)
+			}
 		}
 
 		shufflePeers(peers)

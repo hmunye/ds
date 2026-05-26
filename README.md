@@ -17,37 +17,37 @@ docker build -t maelstrom .
 Maelstrom "echo" workload:
 
 ```bash
-./maelstrom.sh test -w echo --bin /bin/node --node-count 1 --time-limit 10
+./maelstrom.sh test -w echo --bin /usr/local/bin/echo --node-count 1 --time-limit 10
 ```
 
 Maelstrom "unique-ids" workload:
 
 ```bash
-./maelstrom.sh test -w unique-ids --bin /bin/node --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
+./maelstrom.sh test -w unique-ids --bin /usr/local/bin/unique_ids --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
 ```
 
 Maelstrom "broadcast" workload (single-node):
 
 ```bash
-./maelstrom.sh test -w broadcast --bin /bin/node --node-count 1 --time-limit 20 --rate 10
+./maelstrom.sh test -w broadcast --bin /usr/local/bin/broadcast --node-count 1 --time-limit 20 --rate 10
 ```
 
 Maelstrom "broadcast" workload (multi-node):
 
 ```bash
-./maelstrom.sh test -w broadcast --bin /bin/node --node-count 5 --time-limit 20 --rate 10
+./maelstrom.sh test -w broadcast --bin /usr/local/bin/broadcast --node-count 5 --time-limit 20 --rate 10
 ```
 
 Maelstrom "broadcast" workload (fault-tolerant):
 
 ```bash
-./maelstrom.sh test -w broadcast --bin /bin/node --node-count 5 --time-limit 20 --rate 10 --nemesis partition
+./maelstrom.sh test -w broadcast --bin /usr/local/bin/broadcast --node-count 5 --time-limit 20 --rate 10 --nemesis partition
 ```
 
 Maelstrom "broadcast" workload (efficient):
 
 ```bash
-./maelstrom.sh test -w broadcast --bin /bin/node --node-count 25 --time-limit 20 --rate 100 --latency 100
+./maelstrom.sh test -w broadcast --bin /usr/local/bin/broadcast --node-count 25 --time-limit 20 --rate 100 --latency 100
 ```
 
 Part I: (`WithFanout`=4, `WithInterval`=120ms)
@@ -65,7 +65,7 @@ Part II: (`WithFanout`=3, `WithInterval`=150ms)
 Maelstrom "g-counter" workload:
 
 ```bash
-./maelstrom.sh test -w g-counter --bin /bin/node --node-count 3 --rate 100 --time-limit 20 --nemesis partition
+./maelstrom.sh test -w g-counter --bin /usr/local/bin/g_counter --node-count 3 --rate 100 --time-limit 20 --nemesis partition
 ```
 
 ## License

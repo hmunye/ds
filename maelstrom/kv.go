@@ -50,7 +50,7 @@ func KVRead[T any](kv *KV, ctx context.Context, key string) (T, error) {
 		slog.Warn("timeout on waiting for \"read\" response", slog.String("service", kv.ty))
 
 		var zero T
-		return zero, err
+		return zero, ctx.Err()
 	}
 }
 

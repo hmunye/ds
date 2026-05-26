@@ -40,7 +40,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -51,7 +50,7 @@ type processFunc func(json.RawMessage) error
 type Node struct {
 	// NodeID is the identifier of this node.
 	NodeID string
-	// NodeIDs lists all node IDs in the cluster (excluding this node).
+	// NodeIDs lists all node IDs in the cluster.
 	NodeIDs []string
 
 	msgID       atomic.Uint32
@@ -257,7 +256,7 @@ func (n *Node) handleError() {
 			slog.Int("code", int(*incoming.Body.Code)),
 		)
 
-		return nil
+		return incoming.Body.Code
 	})
 }
 
@@ -266,11 +265,6 @@ func (n *Node) init(nodeID string, nodeIDs []string) {
 	// messages are delivered until the node responds to the "init" message.
 	n.NodeID = nodeID
 	n.NodeIDs = nodeIDs
-
-	// Remove this node from the cluster list.
-	if i := slices.Index(n.NodeIDs, n.NodeID); i != -1 {
-		n.NodeIDs = slices.Delete(n.NodeIDs, i, i+1)
-	}
 
 	n.logger = n.logger.With(slog.String("node_id", n.NodeID))
 	slog.SetDefault(n.logger)
