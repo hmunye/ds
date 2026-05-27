@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
+	"time"
 
 	"github.com/hmunye/ds/maelstrom"
 )
@@ -41,46 +42,63 @@ type ListCommitsResponse struct {
 	Offsets map[string]int `json:"offsets"`
 }
 
-type KafkaLog struct {
-	logs map[string][]int
-	lMu  sync.Mutex
-
-	commits map[string]int
-	cMu     sync.Mutex
-}
-
 func main() {
 	ctx, stop := signal.NotifyContext(
 		context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	n := maelstrom.NewNode()
-
-	kafka := KafkaLog{logs: make(map[string][]int), commits: make(map[string]int)}
+	kv := maelstrom.NewLinKV(n)
 
 	maelstrom.Handle(n, "send", func(incoming maelstrom.Message[SendRequest]) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
 		key := incoming.Body.Payload.Key
 		msg := incoming.Body.Payload.Msg
 
-		kafka.lMu.Lock()
+		var offset int
 
-		kafka.logs[key] = append(kafka.logs[key], msg)
-		offset := len(kafka.logs[key]) - 1
+		for {
+			logs, err := maelstrom.KVRead[[]int](kv, ctx, key)
+			if err != nil {
+				if code, ok := err.(*maelstrom.ErrorCode); !ok || *code != maelstrom.ErrKeyDoesNotExist {
+					return err
+				}
+			}
 
-		kafka.lMu.Unlock()
+			err = maelstrom.KVCompareAndSwap(kv, ctx, key, logs, append(logs, msg), true)
+			if err != nil {
+				if code, ok := err.(*maelstrom.ErrorCode); ok && *code == maelstrom.ErrPreconditionFailed {
+					continue
+				}
+
+				if code, ok := err.(*maelstrom.ErrorCode); !ok || *code != maelstrom.ErrKeyDoesNotExist {
+					return err
+				}
+			}
+
+			offset = len(logs)
+			break
+		}
 
 		payload := SendResponse{Offset: offset}
 		return maelstrom.Reply(n, incoming, "send_ok", payload)
 	})
 
 	maelstrom.Handle(n, "poll", func(incoming maelstrom.Message[PollRequest]) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
 		offsets := incoming.Body.Payload.Offsets
 		msgs := make(map[string][][2]int, len(offsets))
 
-		kafka.lMu.Lock()
-
 		for key, offset := range offsets {
-			logs := kafka.logs[key]
+			logs, err := maelstrom.KVRead[[]int](kv, ctx, key)
+			if err != nil {
+				return err
+			}
+
 			key_msgs := make([][2]int, 0)
 
 			l_len := min(offset+10, len(logs))
@@ -92,44 +110,44 @@ func main() {
 			msgs[key] = key_msgs
 		}
 
-		kafka.lMu.Unlock()
-
 		payload := PollResponse{Msgs: msgs}
 		return maelstrom.Reply(n, incoming, "poll_ok", payload)
 	})
 
 	maelstrom.Handle(n, "commit_offsets", func(incoming maelstrom.Message[CommitRequest]) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
 		offsets := incoming.Body.Payload.Offsets
 
-		kafka.cMu.Lock()
-
 		for key, offset := range offsets {
-			kafka.commits[key] = offset
+			err := maelstrom.KVWrite(kv, ctx, fmt.Sprintf("commit-%s", key), offset)
+			if err != nil {
+				return err
+			}
 		}
-
-		kafka.cMu.Unlock()
 
 		return maelstrom.Reply(n, incoming, "commit_offsets_ok", maelstrom.EmptyPayload{})
 	})
 
 	maelstrom.Handle(n, "list_committed_offsets", func(incoming maelstrom.Message[ListCommitsRequest]) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
 		keys := incoming.Body.Payload.Keys
 		offsets := make(map[string]int)
 
-		kafka.cMu.Lock()
-
 		for _, key := range keys {
-			offset, ok := kafka.commits[key]
-			if ok {
-				offsets[key] = offset
+			offset, err := maelstrom.KVRead[int](kv, ctx, fmt.Sprintf("commit-%s", key))
+			if err != nil {
+				return err
 			}
+
+			offsets[key] = offset
 		}
 
-		kafka.cMu.Unlock()
-
 		payload := ListCommitsResponse{Offsets: offsets}
-
-		return maelstrom.Reply(n, incoming, "commit_offsets_ok", payload)
+		return maelstrom.Reply(n, incoming, "list_committed_offsets_ok", payload)
 	})
 
 	if err := n.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {

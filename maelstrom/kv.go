@@ -7,6 +7,7 @@ import (
 
 const (
 	seqKV = "seq-kv"
+	linKV = "lin-kv"
 )
 
 // KV represents a key/value store service provided by `Maelstrom`.
@@ -18,6 +19,11 @@ type KV struct {
 // NewSeqKV returns an initialized KV for the "seq-kv" service.
 func NewSeqKV(n *Node) *KV {
 	return &KV{seqKV, n}
+}
+
+// NewLinKV returns an initialized KV for the "lin-kv" service.
+func NewLinKV(n *Node) *KV {
+	return &KV{linKV, n}
 }
 
 // KVRead returns the value for a given key in the key/value store. Returns
