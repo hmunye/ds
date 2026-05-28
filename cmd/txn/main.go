@@ -13,7 +13,7 @@ import (
 )
 
 type TXNMessage struct {
-	TXN [][]any `json:"txn"`
+	TXN [][3]any `json:"txn"`
 }
 
 type Store struct {
@@ -30,7 +30,7 @@ func main() {
 	store := Store{kv: make(map[int]int)}
 
 	maelstrom.Handle(n, "txn", func(incoming maelstrom.Message[TXNMessage]) error {
-		txn_out := make([][]any, 0, len(incoming.Body.Payload.TXN))
+		txn_out := make([][3]any, 0, len(incoming.Body.Payload.TXN))
 
 		store.mu.Lock()
 
@@ -41,10 +41,23 @@ func main() {
 
 			switch op {
 			case "r":
-				txn_out = append(txn_out, []any{"r", key, store.kv[key]})
+				txn_out = append(txn_out, [3]any{"r", key, store.kv[key]})
 			case "w":
 				store.kv[key] = int(val.(float64))
 				txn_out = append(txn_out, operation)
+
+				for _, nodeID := range n.NodeIDs {
+					if nodeID != n.NodeID {
+						payload := TXNMessage{
+							TXN: [][3]any{operation},
+						}
+						_, err := maelstrom.RPC[TXNMessage, TXNMessage](n, nodeID, "txn", payload)
+						if err != nil {
+							store.mu.Unlock()
+							return err
+						}
+					}
+				}
 			}
 
 		}

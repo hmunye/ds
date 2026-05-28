@@ -136,6 +136,7 @@ outer:
 			replyID := meta.Body.InReplyTo
 			if replyID != 0 {
 				n.callbacksMu.Lock()
+
 				callback, exists := n.callbacks[replyID]
 				delete(n.callbacks, replyID)
 
