@@ -40,6 +40,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -265,6 +266,8 @@ func (n *Node) init(nodeID string, nodeIDs []string) {
 	// messages are delivered until the node responds to the "init" message.
 	n.NodeID = nodeID
 	n.NodeIDs = nodeIDs
+
+	slices.Sort(n.NodeIDs)
 
 	n.logger = n.logger.With(slog.String("node_id", n.NodeID))
 	slog.SetDefault(n.logger)
