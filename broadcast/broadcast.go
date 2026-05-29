@@ -70,39 +70,47 @@ type Broadcaster struct {
 	interval, timeout time.Duration
 	messages          map[int]struct{} // set for message de-duplication
 	msgMu             sync.Mutex
-	acknowledged      map[string]map[int]struct{}
-	ackMu             sync.Mutex
+	known             map[string]map[int]struct{}
+	knownMu           sync.Mutex
 }
 
-// New returns a Broadcaster using the given [maelstrom.Node]. The Broadcaster
-// is not active until [Register] is called.
+// New returns a Broadcaster using the given [maelstrom.Node].
 func New(n *maelstrom.Node) *Broadcaster {
 	return &Broadcaster{
-		n:            n,
-		fanout:       3,
-		interval:     100 * time.Millisecond,
-		timeout:      time.Second,
-		messages:     make(map[int]struct{}),
-		acknowledged: make(map[string]map[int]struct{}),
+		n:        n,
+		fanout:   3,
+		interval: 100 * time.Millisecond,
+		timeout:  time.Second,
+		messages: make(map[int]struct{}),
+		known:    make(map[string]map[int]struct{}),
 	}
 }
 
-// WithFanout sets the number of peers to gossip with on each interval. The
-// effective value is capped at the number of available peers. Defaults to 3.
+// WithFanout sets the number of peers the [maelstrom.Node] gossips with on each
+// interval. The effective value is capped at the number of available peers.
+// Defaults to 3.
+//
+// Increasing fan-out improves propagation speed and lowers time to convergence
+// (latency), but increases network traffic and message overhead. Decreasing
+// fan-out reduces network cost but increases time to convergence.
 func (b *Broadcaster) WithFanout(f int) *Broadcaster {
 	b.fanout = f
 	return b
 }
 
-// WithInterval sets how frequently the node gossips with its peers. Defaults to
-// 100ms.
+// WithInterval sets how frequently the [maelstrom.Node] gossips with its peers.
+// Defaults to 100ms.
+//
+// A lower interval increases gossip frequency, improving time to convergence
+// but increasing network traffic. A higher interval reduces traffic but slows
+// down convergence.
 func (b *Broadcaster) WithInterval(d time.Duration) *Broadcaster {
 	b.interval = d
 	return b
 }
 
-// WithTimeout sets the duration to wait for a "gossip" response from a peer
-// before giving up. Defaults to 1s.
+// WithTimeout sets how long to wait for a "gossip" response from a peer before
+// giving up. Defaults to 1s.
 func (b *Broadcaster) WithTimeout(d time.Duration) *Broadcaster {
 	b.timeout = d
 	return b
@@ -115,7 +123,9 @@ func (b *Broadcaster) Start() {
 	maelstrom.Handle(b.n, "broadcast",
 		func(incoming maelstrom.Message[broadcastRequest]) error {
 			b.msgMu.Lock()
+
 			b.messages[incoming.Body.Payload.Message] = struct{}{}
+
 			b.msgMu.Unlock()
 
 			return maelstrom.Reply(b.n, incoming, "broadcast_ok", maelstrom.EmptyPayload{})
@@ -132,7 +142,8 @@ func (b *Broadcaster) Start() {
 
 	maelstrom.Handle(b.n, "topology",
 		func(incoming maelstrom.Message[topologyRequest]) error {
-			// Ignoring the topology given in favor of random subset of peers.
+			// Ignore the provided topology and instead use a random subset of
+			// peers derived from the full cluster, based on fan-out.
 			return maelstrom.Reply(b.n, incoming, "topology_ok", maelstrom.EmptyPayload{})
 		})
 
@@ -166,22 +177,22 @@ func (b *Broadcaster) gossip() {
 
 			peers = slices.Clone(b.n.NodeIDs)
 
-			// Remove this node from the peers list.
+			// Remove this node from the peers list for future broadcasts.
 			if i := slices.Index(peers, b.n.NodeID); i != -1 {
 				peers = slices.Delete(peers, i, i+1)
 			}
 		}
 
 		shufflePeers(peers)
-
 		subset := peers[:min(b.fanout, len(peers))]
-		for _, peer := range subset {
-			b.ackMu.Lock()
 
-			peer_msgs := b.acknowledged[peer]
+		for _, peer := range subset {
+			b.knownMu.Lock()
+
+			peer_msgs := b.known[peer]
 			delta := b.deltaMessages(peer_msgs)
 
-			b.ackMu.Unlock()
+			b.knownMu.Unlock()
 
 			if len(delta) == 0 {
 				continue
@@ -201,9 +212,9 @@ func (b *Broadcaster) gossip() {
 
 				select {
 				case <-ch:
-					b.ackMu.Lock()
+					b.knownMu.Lock()
 
-					peer_msgs := b.acknowledged[peer]
+					peer_msgs := b.known[peer]
 					if peer_msgs == nil {
 						peer_msgs = make(map[int]struct{}, len(delta))
 					}
@@ -212,15 +223,18 @@ func (b *Broadcaster) gossip() {
 						peer_msgs[msg] = struct{}{}
 					}
 
-					b.ackMu.Unlock()
+					b.knownMu.Unlock()
 				case <-time.After(b.timeout):
-					slog.Warn("timeout on waiting for \"gossip\" response")
+					slog.Warn("timed-out waiting for \"gossip\" response")
 				}
 			}()
 		}
 	}
 }
 
+// deltaMessages computes the difference between this node's message set and the
+// peer's known messages. Sending only unseen messages improves gossip
+// efficiency by avoiding redundant retransmission and reducing payload sizes.
 func (b *Broadcaster) deltaMessages(peer_msgs map[int]struct{}) []int {
 	b.msgMu.Lock()
 	defer b.msgMu.Unlock()
@@ -236,6 +250,8 @@ func (b *Broadcaster) deltaMessages(peer_msgs map[int]struct{}) []int {
 	return delta
 }
 
+// snapshotMessages converts this node's message set into a slice of messages,
+// ready for transmission.
 func (b *Broadcaster) snapshotMessages() []int {
 	b.msgMu.Lock()
 	defer b.msgMu.Unlock()
@@ -249,6 +265,9 @@ func (b *Broadcaster) snapshotMessages() []int {
 	return msgs
 }
 
+// shufflePeers randomizes the order of peers. This ensures that gossip messages
+// propagate along different paths through the network, preventing hotspots and
+// improving overall convergence speed and reliability.
 func shufflePeers(peers []string) {
 	rand.Shuffle(len(peers), func(i, j int) {
 		peers[i], peers[j] = peers[j], peers[i]

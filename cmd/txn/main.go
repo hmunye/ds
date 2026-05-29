@@ -17,8 +17,8 @@ type TXNMessage struct {
 }
 
 type Store struct {
-	kv map[int]int
-	mu sync.Mutex
+	entries map[int]int
+	mu      sync.Mutex
 }
 
 func main() {
@@ -27,13 +27,31 @@ func main() {
 	defer stop()
 
 	n := maelstrom.NewNode()
-	store := Store{kv: make(map[int]int)}
+	kv := Store{entries: make(map[int]int)}
 
+	// Executes a transaction consisting of a sequence of read and write
+	// operations against a local in-memory key-value store. All operations are
+	// applied under a mutex, providing single-node atomicity and ensuring no
+	// concurrent transaction can observe intermediate state (serializable
+	// execution at the node level).
+	//
+	// This guarantees read committed behavior locally: uncommitted writes are
+	// never visible to other operations on the same node.
+	//
+	// After local execution, all writes are asynchronously replicated to other
+	// nodes using best-effort, fire-and-forget propagation. Replicating the
+	// full write set ensures write atomicity across replicas and prevents G1b
+	// (intermediate read) anomalies, where only a subset of a transaction's
+	// writes would be observed.
+	//
+	// This replication model provides eventual consistency across the cluster,
+	// but does not provide global serializability due to the absence of
+	// coordination or consensus.
 	maelstrom.Handle(n, "txn", func(incoming maelstrom.Message[TXNMessage]) error {
 		txn_out := make([][3]any, 0, len(incoming.Body.Payload.TXN))
 		writes := make([][3]any, 0)
 
-		store.mu.Lock()
+		kv.mu.Lock()
 
 		for _, operation := range incoming.Body.Payload.TXN {
 			op := operation[0].(string)
@@ -42,15 +60,15 @@ func main() {
 
 			switch op {
 			case "r":
-				txn_out = append(txn_out, [3]any{"r", key, store.kv[key]})
+				txn_out = append(txn_out, [3]any{"r", key, kv.entries[key]})
 			case "w":
-				store.kv[key] = int(val.(float64))
+				kv.entries[key] = int(val.(float64))
 				txn_out = append(txn_out, operation)
 				writes = append(writes, operation)
 			}
 		}
 
-		store.mu.Unlock()
+		kv.mu.Unlock()
 
 		payload := TXNMessage{TXN: txn_out}
 

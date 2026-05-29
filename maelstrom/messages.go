@@ -5,34 +5,6 @@ import (
 	"fmt"
 )
 
-type initRequest struct {
-	NodeID  string   `json:"node_id"`
-	NodeIDs []string `json:"node_ids"`
-}
-
-type kvReadRequest struct {
-	Key string `json:"key"`
-}
-
-type kvReadResponse[T any] struct {
-	Value T `json:"value"`
-}
-
-type kvWriteRequest[T any] struct {
-	Key   string `json:"key"`
-	Value T      `json:"value"`
-}
-
-type kvCASRequest[T any] struct {
-	Key               string `json:"key"`
-	From              T      `json:"from"`
-	To                T      `json:"to"`
-	CreateIfNotExists bool   `json:"create_if_not_exists,omitempty"`
-}
-
-// EmptyPayload represents a [Message] with no expected payload.
-type EmptyPayload struct{}
-
 // Message represents a single `Maelstrom` message. Each instantiated
 // [MessageBody] must marshal to a valid JSON object.
 type Message[T any] struct {
@@ -51,6 +23,9 @@ type MessageBody[T any] struct {
 	Text      string     `json:"text,omitempty"`
 	Payload   T          `json:"-"`
 }
+
+// EmptyPayload represents a [Message] with no expected payload.
+type EmptyPayload struct{}
 
 func (body MessageBody[T]) MarshalJSON() ([]byte, error) {
 	payloadBytes, err := json.Marshal(body.Payload)
@@ -140,4 +115,29 @@ func (body *MessageBody[T]) UnmarshalJSON(data []byte) error {
 	}
 
 	return json.Unmarshal(remaining, &body.Payload)
+}
+
+type initRequest struct {
+	NodeID  string   `json:"node_id"`
+	NodeIDs []string `json:"node_ids"`
+}
+
+type kvReadRequest struct {
+	Key string `json:"key"`
+}
+
+type kvReadResponse[T any] struct {
+	Value T `json:"value"`
+}
+
+type kvWriteRequest[T any] struct {
+	Key   string `json:"key"`
+	Value T      `json:"value"`
+}
+
+type kvCASRequest[T any] struct {
+	Key               string `json:"key"`
+	From              T      `json:"from"`
+	To                T      `json:"to"`
+	CreateIfNotExists bool   `json:"create_if_not_exists,omitempty"`
 }

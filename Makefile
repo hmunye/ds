@@ -13,8 +13,8 @@ FLAGS += $(GCFLAGS) $(LDFLAGS)
 .PHONY: all fmt test lint vuln clean
 
 all: fmt
-	@mkdir -p $(BUILD_DIR)
-	@go build -o $(BUILD_DIR) $(FLAGS) ./cmd/...
+	@mkdir -p $(BUILD_DIR)/
+	@go build -o $(BUILD_DIR)/ $(FLAGS) ./cmd/...
 
 fmt:
 	@go fmt ./...

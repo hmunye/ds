@@ -38,13 +38,13 @@ Maelstrom "broadcast" workload (multi-node):
 ./maelstrom.sh test -w broadcast --bin /usr/local/bin/broadcast --node-count 5 --time-limit 20 --rate 10
 ```
 
-Maelstrom "broadcast" workload (fault-tolerant):
+Maelstrom "broadcast" workload (multi-node, partitioned):
 
 ```bash
 ./maelstrom.sh test -w broadcast --bin /usr/local/bin/broadcast --node-count 5 --time-limit 20 --rate 10 --nemesis partition
 ```
 
-Maelstrom "broadcast" workload (efficient):
+Maelstrom "broadcast" workload (multi-node, efficient):
 
 ```bash
 ./maelstrom.sh test -w broadcast --bin /usr/local/bin/broadcast --node-count 25 --time-limit 20 --rate 100 --latency 100
@@ -62,7 +62,7 @@ Part II: (`WithFanout`=3, `WithInterval`=150ms)
 - Median latency is below 1 second
 - Maximum latency is below 2 seconds
 
-Maelstrom "g-counter" workload:
+Maelstrom "g-counter" workload (multi-node, partitioned):
 
 ```bash
 ./maelstrom.sh test -w g-counter --bin /usr/local/bin/g_counter --node-count 3 --rate 100 --time-limit 20 --nemesis partition
@@ -74,7 +74,7 @@ Maelstrom "kafka" workload (single-node):
 ./maelstrom.sh test -w kafka --bin /usr/local/bin/kafka --node-count 1 --concurrency 2n --time-limit 20 --rate 1000
 ```
 
-Maelstrom "kafka" workload (multi-node and efficient):
+Maelstrom "kafka" workload (multi-node, efficient):
 
 ```bash
 ./maelstrom.sh test -w kafka --bin /usr/local/bin/kafka --node-count 2 --concurrency 2n --time-limit 20 --rate 1000

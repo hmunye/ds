@@ -144,7 +144,7 @@ outer:
 
 				if !exists {
 					slog.Warn(
-						"ignoring incoming response",
+						"no callback found for response",
 						slog.Int("in_reply_to", int(replyID)),
 						slog.String("type", ty),
 					)
@@ -155,7 +155,7 @@ outer:
 			} else {
 				handler, exists := n.handlers[ty]
 				if !exists {
-					err = fmt.Errorf("unregistered type for incoming message: %q", ty)
+					err = fmt.Errorf("no handler found for incoming message type %q", ty)
 					break outer
 				}
 
@@ -191,7 +191,7 @@ func processMessage(wg *sync.WaitGroup, line json.RawMessage, fn processFunc) {
 }
 
 // GUID returns a globally unique identifier, provided calls to this function
-// are interleaved with [Node.Reply].
+// are interleaved with [Reply] or [RPC].
 func (n *Node) GUID() string {
 	// Generating unique IDs within a program is straightforward. A monotonic
 	// counter or a random `UUID` is usually sufficient. In distributed systems,
@@ -238,7 +238,6 @@ func (n *Node) GUID() string {
 func (n *Node) handleInit() {
 	Handle(n, "init", func(incoming Message[initRequest]) error {
 		n.init(incoming.Body.Payload.NodeID, incoming.Body.Payload.NodeIDs)
-
 		return Reply(n, incoming, "init_ok", EmptyPayload{})
 	})
 }
@@ -253,9 +252,9 @@ func (n *Node) handleError() {
 		}
 
 		slog.Error(
-			"\"error\" message received",
-			slog.String("error", msg),
+			"\"error\" message received from client",
 			slog.Int("code", int(*incoming.Body.Code)),
+			slog.String("error", msg),
 		)
 
 		return incoming.Body.Code
@@ -263,11 +262,18 @@ func (n *Node) handleError() {
 }
 
 func (n *Node) init(nodeID string, nodeIDs []string) {
-	// Safe for concurrent use without locks: `Maelstrom` ensures no other
+	// NOTE: Safe for concurrent use without locks: `Maelstrom` ensures no other
 	// messages are delivered until the node responds to the "init" message.
 	n.NodeID = nodeID
 	n.NodeIDs = nodeIDs
 
+	// Ensure cluster node IDs are sorted to provide deterministic ordering for
+	// index-based partitioning and operations such as key routing (e.g., modulo
+	// sharding in "kafka" workloads).
+	//
+	// Sharding is the technique of partitioning data or requests across
+	// multiple nodes so that each node is responsible for a subset of the
+	// overall keyspace.
 	slices.Sort(n.NodeIDs)
 
 	n.logger = n.logger.With(slog.String("node_id", n.NodeID))
@@ -329,7 +335,7 @@ func Reply[T, U any](n *Node, incoming Message[T], ty string, payload U) error {
 }
 
 // RPC transmits a message asynchronously to the given destination node and
-// returns a channel that will receive the corresponding typed response.
+// returns a channel that will receive the corresponding typed message response.
 func RPC[T, U any](n *Node, dst, ty string, payload U) (<-chan Message[T], error) {
 	id := uint(n.msgID.Add(1))
 	ch := make(chan Message[T], 1)

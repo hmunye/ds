@@ -43,6 +43,13 @@ type ListCommitsResponse struct {
 	Offsets map[string]int `json:"offsets"`
 }
 
+// Broker represents a Kafka broker.
+//
+// In Kafka, a broker is a server responsible for storing and serving records
+// for one or more topic partitions. Each broker maintains an append-only log
+// for each topic and tracks committed offsets, which indicate how far
+// consumers have read in each partition. Producers write new records to the
+// broker, and consumers read records and update their committed offsets.
 type Broker struct {
 	logs map[string][]int
 	lMu  sync.Mutex
@@ -66,6 +73,16 @@ func main() {
 	n := maelstrom.NewNode()
 	broker := Broker{logs: make(map[string][]int), commits: make(map[string]int)}
 
+	// Appends a message to the log associated with the given key. Ownership of
+	// a key is determined through hash-based sharding: the key is hashed and
+	// mapped to a node in the cluster using modulo partitioning. This allows
+	// the keyspace to be distributed across brokers, balancing load and
+	// reducing contention.
+	//
+	// If the current node owns the key, the message is appended to the local
+	// partition and its offset is returned. Otherwise, the request is proxied
+	// to the owning broker, which performs the append and returns the assigned
+	// offset.
 	maelstrom.Handle(n, "send", func(incoming maelstrom.Message[SendRequest]) error {
 		key := incoming.Body.Payload.Key
 
@@ -103,6 +120,9 @@ func main() {
 		return maelstrom.Reply(n, incoming, "send_ok", payload)
 	})
 
+	// Introduces offset-based log reads over an append-only distributed log,
+	// allowing clients to retrieve a bounded range of entries starting from a
+	// specific position rather than reading single values.
 	maelstrom.Handle(n, "poll", func(incoming maelstrom.Message[PollRequest]) error {
 		offsets := incoming.Body.Payload.Offsets
 		msgs := make(map[string][][2]int, len(offsets))
@@ -150,6 +170,8 @@ func main() {
 		return maelstrom.Reply(n, incoming, "poll_ok", payload)
 	})
 
+	// Records the latest consumed offsets for each key, allowing the broker to
+	// track consumer progress and ensure messages are not reprocessed.
 	maelstrom.Handle(n, "commit_offsets", func(incoming maelstrom.Message[CommitRequest]) error {
 		offsets := incoming.Body.Payload.Offsets
 
@@ -185,6 +207,8 @@ func main() {
 		return maelstrom.Reply(n, incoming, "commit_offsets_ok", maelstrom.EmptyPayload{})
 	})
 
+	// Queries the latest committed offsets for a set of keys, representing a
+	// distributed lookup of consumer progress metadata.
 	maelstrom.Handle(n, "list_committed_offsets", func(incoming maelstrom.Message[ListCommitsRequest]) error {
 		keys := incoming.Body.Payload.Keys
 		offsets := make(map[string]int)
