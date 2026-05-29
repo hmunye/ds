@@ -80,22 +80,28 @@ Maelstrom "kafka" workload (multi-node and efficient):
 ./maelstrom.sh test -w kafka --bin /usr/local/bin/kafka --node-count 2 --concurrency 2n --time-limit 20 --rate 1000
 ```
 
-Maelstrom "txn-rw-register" workload (single-node, totally available)
+Maelstrom "txn-rw-register" workload (single-node, read uncommitted, totally available)
 
 ```bash
 ./maelstrom.sh test -w txn-rw-register --bin /usr/local/bin/txn --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total
 ```
 
-Maelstrom "txn-rw-register" workload (multi-node, totally available)
+Maelstrom "txn-rw-register" workload (multi-node, read uncommitted, totally available)
 
 ```bash
 ./maelstrom.sh test -w txn-rw-register --bin /usr/local/bin/txn --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total
 ```
 
-Maelstrom "txn-rw-register" workload (multi-node, partitioned)
+Maelstrom "txn-rw-register" workload (multi-node, read uncommitted, partitioned)
 
 ```bash
 ./maelstrom.sh test -w txn-rw-register --bin /usr/local/bin/txn --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
+```
+
+Maelstrom "txn-rw-register" workload (multi-node, read committed, partitioned)
+
+```bash
+./maelstrom.sh test -w txn-rw-register --bin /usr/local/bin/txn --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-committed --availability total –-nemesis partition
 ```
 
 ## License

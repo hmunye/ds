@@ -31,6 +31,7 @@ func main() {
 
 	maelstrom.Handle(n, "txn", func(incoming maelstrom.Message[TXNMessage]) error {
 		txn_out := make([][3]any, 0, len(incoming.Body.Payload.TXN))
+		writes := make([][3]any, 0)
 
 		store.mu.Lock()
 
@@ -45,27 +46,32 @@ func main() {
 			case "w":
 				store.kv[key] = int(val.(float64))
 				txn_out = append(txn_out, operation)
-
-				for _, nodeID := range n.NodeIDs {
-					if nodeID != n.NodeID {
-						payload := TXNMessage{
-							TXN: [][3]any{operation},
-						}
-						_, err := maelstrom.RPC[TXNMessage, TXNMessage](n, nodeID, "txn", payload)
-						if err != nil {
-							store.mu.Unlock()
-							return err
-						}
-					}
-				}
+				writes = append(writes, operation)
 			}
-
 		}
 
 		store.mu.Unlock()
 
 		payload := TXNMessage{TXN: txn_out}
-		return maelstrom.Reply(n, incoming, "txn_ok", payload)
+
+		err := maelstrom.Reply(n, incoming, "txn_ok", payload)
+		if err != nil {
+			return err
+		}
+
+		for _, nodeID := range n.NodeIDs {
+			if nodeID != n.NodeID {
+				payload := TXNMessage{
+					TXN: writes,
+				}
+				_, err := maelstrom.RPC[TXNMessage, TXNMessage](n, nodeID, "txn", payload)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		return nil
 	})
 
 	if err := n.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
